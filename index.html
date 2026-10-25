@@ -189,6 +189,7 @@ table.chain td.itm{background:#0b1524}
 /* ---- phone app (mobile build) ---- */
 .tabs .ts{display:none}
 #btn-install,#btn-wake{display:none}
+.mob-srcbar{display:flex;align-items:center;gap:8px;flex:1 1 100%;font:12px var(--f-num);color:var(--tx2)}.mob-srcbar span{flex:1;min-width:0}
 .strip-more{display:none;width:100%;padding:6px;border:0;border-bottom:1px solid var(--ln);background:var(--p);color:var(--tx2);font:11px var(--f-num);letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
 .mob-note{margin:0 0 8px;padding:8px 10px;border:1px solid var(--am);background:var(--am2);color:var(--am);font:12px/1.4 var(--f-num)}
 @media (max-width:700px){
@@ -235,7 +236,7 @@ table.chain td.itm{background:#0b1524}
     <button class="btn" id="btn-restart" type="button">Restart</button>
   </span>
   <button class="money" id="hdr-money" type="button" title="Which money the bot uses. Change it on the Auto 360 tab.">PAPER · bot off</button>
-  <button class="btn" id="btn-install" type="button">Install app</button><button class="btn" id="btn-wake" type="button" aria-pressed="false" title="Stops the phone screen from sleeping while the bot runs">Keep screen on</button><span class="sp"></span>
+  <span class="mob-srcbar"><span id="mob-src">Live prices off</span><button class="btn" id="mob-reconnect" type="button">Reconnect</button></span><button class="btn" id="btn-install" type="button">Install app</button><button class="btn" id="btn-wake" type="button" aria-pressed="false" title="Stops the phone screen from sleeping while the bot runs">Keep screen on</button><span class="sp"></span>
   <span class="lb" id="utc-lb">UTC</span><span class="clock" id="clock">--:--:--</span><span class="lb" id="clock-ist" style="margin-left:4px"></span>
 </header>
 
@@ -2703,6 +2704,30 @@ if("IntersectionObserver" in window)new IntersectionObserver(es=>{es.forEach(x=>
 document.addEventListener("visibilitychange",()=>{if(!document.hidden){dirty.all=true;NET.need=true;}});
 /* mobile: phones freeze timers and price streams while the app is off screen */
 let mobHidAt=0;document.addEventListener("visibilitychange",()=>{if(document.hidden){mobHidAt=Date.now();return;}const gone=mobHidAt?Math.round((Date.now()-mobHidAt)/60000):0;mobHidAt=0;if(gone>=1&&AUTO.on){botLog("The app was in the background for about "+gone+" min. The bot could not watch prices in that time.","err");dirty.all=true;}});
+/* mobile: find a price source this phone's network can reach, then fetch + stream (no taps) */
+async function mobProbe(u){const c=new AbortController(),t=setTimeout(()=>c.abort(),7000);try{const r=await fetch(u,{signal:c.signal,cache:"no-store"});return r.ok;}catch(e){return false;}finally{clearTimeout(t);}}
+const MOB_SRC={bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time"},
+  binv:{ex:"binance",name:"Binance public mirror (binance.vision)",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time"},
+  dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",probe:"/v2/tickers/BTCUSD"}};
+let mobBusy=false;
+async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;const say=t=>{const e=$("mob-src");if(e)e.textContent=t;};
+  try{say("Finding a live price source…");
+    const order=["dlt","bin","binv"];let pick=null;
+    for(const k of order){const S=MOB_SRC[k];say("Trying "+S.name+"…");if(await mobProbe(S.rest+S.probe)){pick=S;break;}}
+    if(!pick){say("No price source answered. Check the phone has internet (try Wi-Fi or mobile data), then tap Reconnect.");sysMsg("Live prices: Binance, its mirror and Delta India all failed from this network","risk");return;}
+    const exChanged=pick.ex!==cfg.ex;cfg.ex=pick.ex;
+    if(pick.ex==="binance"){cfg.binRest=pick.rest;cfg.binWs=pick.ws;cfg.useFut=await mobProbe(cfg.binFut+"/fapi/v1/time");}
+    else cfg.deltaRest=pick.rest;
+    saveCfg();
+    if(exChanged){buildUniverse();buildNet();fillSymSelect();account=null;DLT.products=null;regCache.t=-1;setMode("live");}
+    say("Live prices from "+pick.name);
+    await refreshRest();if(!feedState.connected)connectFeed();
+  }finally{mobBusy=false;dirty.all=true;}}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&mode==="live"&&!feedState.connected)mobConnect();});
+setTimeout(()=>{if(mode==="live")mobConnect();},700);
+(function(){const b=document.getElementById("mob-reconnect");if(b)b.addEventListener("click",()=>{if(mode!=="live")setMode("live");closeFeed();mobConnect();});
+  $("mode").addEventListener("change",()=>{if($("mode").value==="live")setTimeout(mobConnect,300);});})();
+
 
 /* ---------- start ---------- */
 readCols();buildUniverse();buildNet();fillSymSelect();
@@ -2743,9 +2768,6 @@ window.__cxt={inst,IX,bars,triggers,tape,journal:()=>journal,cfg:()=>cfg,ingest,
   window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();deferred=e;if(ib)ib.style.display="inline-block";});
   window.addEventListener("appinstalled",function(){if(ib)ib.style.display="none";});
   if(ib)ib.addEventListener("click",function(){if(!deferred)return;deferred.prompt();deferred.userChoice.finally(function(){deferred=null;ib.style.display="none";});});
-  /* live mode: fetch history and open the price stream automatically */
-  setTimeout(function(){var m=document.getElementById("mode");if(m&&m.value==="live"){var f=document.getElementById("btn-fetch"),c=document.getElementById("btn-feed");
-    if(f)f.click();setTimeout(function(){if(c&&/connect/i.test(c.textContent))c.click();},1500);}},800);
   /* offline shell; only on https (GitHub Pages), never on file:// */
   if("serviceWorker" in navigator&&location.protocol==="https:"){navigator.serviceWorker.register("sw.js").catch(function(){});}
 })();
