@@ -190,6 +190,7 @@ table.chain td.itm{background:#0b1524}
 .tabs .ts{display:none}
 #btn-install,#btn-wake{display:none}
 .mob-srcbar{display:flex;align-items:center;gap:8px;flex:1 1 100%;font:12px var(--f-num);color:var(--tx2)}.mob-srcbar span{flex:1;min-width:0}
+.mob-diag{flex:1 1 100%;margin:0;font:11px/1.4 var(--f-num);color:var(--tx2);white-space:pre-wrap}.mob-diag:empty{display:none}
 .strip-more{display:none;width:100%;padding:6px;border:0;border-bottom:1px solid var(--ln);background:var(--p);color:var(--tx2);font:11px var(--f-num);letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
 .mob-note{margin:0 0 8px;padding:8px 10px;border:1px solid var(--am);background:var(--am2);color:var(--am);font:12px/1.4 var(--f-num)}
 @media (max-width:700px){
@@ -236,7 +237,7 @@ table.chain td.itm{background:#0b1524}
     <button class="btn" id="btn-restart" type="button">Restart</button>
   </span>
   <button class="money" id="hdr-money" type="button" title="Which money the bot uses. Change it on the Auto 360 tab.">PAPER · bot off</button>
-  <span class="mob-srcbar"><span id="mob-src">Live prices off</span><button class="btn" id="mob-reconnect" type="button">Reconnect</button></span><button class="btn" id="btn-install" type="button">Install app</button><button class="btn" id="btn-wake" type="button" aria-pressed="false" title="Stops the phone screen from sleeping while the bot runs">Keep screen on</button><span class="sp"></span>
+  <span class="mob-srcbar"><span id="mob-src">Live prices off</span><button class="btn" id="mob-reconnect" type="button">Reconnect</button></span><pre id="mob-diag" class="mob-diag"></pre><button class="btn" id="btn-install" type="button">Install app</button><button class="btn" id="btn-wake" type="button" aria-pressed="false" title="Stops the phone screen from sleeping while the bot runs">Keep screen on</button><span class="sp"></span>
   <span class="lb" id="utc-lb">UTC</span><span class="clock" id="clock">--:--:--</span><span class="lb" id="clock-ist" style="margin-left:4px"></span>
 </header>
 
@@ -1590,7 +1591,7 @@ async function stopAndCloseAll(){stopAuto("stopped by you (close all)");const sy
 function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg.sig,E=cfg.exec,C=cfg.risk;
   if(!el.dataset.built){el.dataset.built="1";el.innerHTML='<div class="au-top"><span id="au-pill" class="au-pill"></span>'+
     '<label class="lb" for="au-venue">Execution</label><select class="s" id="au-venue"><option value="paper">Paper (no orders)</option><option value="testnet"'+(MOBILE_PAPER?' disabled':'')+'>Delta testnet (test money)'+(MOBILE_PAPER?' · needs computer':'')+'</option><option value="live"'+(LIVE_LOCKED?' disabled':'')+'>Delta LIVE (real money)'+(LIVE_LOCKED?' · locked in v6':'')+'</option></select>'+
-    '<button class="btn pri" id="au-start" type="button">▶ Start auto-trading</button><button class="btn" id="au-stop" type="button">■ Stop</button><button class="btn warn" id="au-kill" type="button">■ Stop + close all</button><span class="msg" id="au-msg"></span></div>'+
+    '<button class="btn pri" id="au-start" type="button">▶ Start auto-trading</button><button class="btn" id="au-stop" type="button">■ Stop</button><button class="btn warn" id="au-kill" type="button">■ Stop + close all</button><button class="btn" id="au-reset" type="button">↺ Reset paper</button><span class="msg" id="au-msg"></span></div>'+
     '<div class="au-grid"><div class="fbox"><h3>Market mood</h3><div id="au-mood"></div></div><div class="fbox"><h3>Safety limits</h3><div id="au-caps"></div></div>'+
     '<div class="fbox"><h3>Trading key (testnet / live only)</h3><div class="note">Create a Delta key with <b>trading</b> permission and <b>no withdrawal</b>, restricted to your IP. It stays in this tab\'s memory only and is never saved.</div>'+
     '<div class="fld"><label for="au-key">API key</label><input id="au-key" type="password" autocomplete="off"></div><div class="fld"><label for="au-sec">API secret</label><input id="au-sec" type="password" autocomplete="off"></div>'+
@@ -1600,7 +1601,7 @@ function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg
     '<div><div class="fbox"><h3>Open positions</h3><div id="au-pos"></div></div><div class="fbox" style="margin-top:8px"><h3>Bot log</h3><div id="au-log" class="au-log"></div></div></div></div>';
     $("au-venue").value=E.venue;$("au-venue").onchange=()=>{if(AUTO.on){$("au-venue").value=AUTO.venue;$("au-msg").textContent="Stop first to change the execution venue.";return;}
       if(MOBILE_PAPER&&$("au-venue").value!=="paper"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=MOBILE_WHY;return;}if(LIVE_LOCKED&&$("au-venue").value==="live"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=LIVE_LOCK_WHY;return;}cfg.exec.venue=$("au-venue").value;saveCfg();dirty.all=true;renderAuto();};
-    $("au-start").onclick=startAuto;$("au-stop").onclick=()=>stopAuto();$("au-kill").onclick=stopAndCloseAll;
+    $("au-start").onclick=startAuto;$("au-stop").onclick=()=>stopAuto();$("au-kill").onclick=stopAndCloseAll;$("au-reset").onclick=mobResetPaper;
     $("au-key").value=TRADE.key;$("au-sec").value=TRADE.secret;const ki=()=>{TRADE.key=$("au-key").value.trim();TRADE.secret=$("au-sec").value.trim();};$("au-key").oninput=ki;$("au-sec").oninput=ki;
     $("au-forget").onclick=()=>{TRADE.key="";TRADE.secret="";$("au-key").value="";$("au-sec").value="";$("au-hmsg").textContent="Trading key cleared from memory.";};
     $("au-helper").onclick=async()=>{const h=$("au-hmsg");h.className="msg";h.textContent="Checking…";try{const s=await helperStatus();h.className="msg up";h.textContent="Helper "+(s.version||"")+": "+(s.trade?"trading ON":"read-only")+" · venue "+s.venue+" · max "+s.maxContracts+" contracts/order · max leverage "+s.maxLeverage+"×";}catch(e){h.className="msg dn";h.textContent=friendly(e)+" · start crypto_trade_helper.py --trade --testnet";}};
@@ -2628,7 +2629,7 @@ function flush(){if(btActive){dirty.all=true;return;} /* v4: never render a back
   renderStrip();renderBanner();renderRisk();renderIndex();renderPx();renderRegime();renderRank();renderTape();renderNetMeta();
   if(dirty.opt||dirty.all||chain)renderOpt();renderFooter();dirty.data=dirty.all=dirty.tape=dirty.opt=false;renderMs=performance.now()-t0;}
 let lastFull=0,lastQuant=0;
-function loop(){const t=Date.now();setText($("clock"),tstr(now())+((mode==="sim"||mode==="replay")?" "+mode:""));setText($("clock-ist"),"IST "+istStr(now()));
+function loop(){const t=Date.now();setText($("clock"),tstr(now())+((mode==="sim"||mode==="replay")?" "+mode:""));
   if(feedState.connected&&t-lastRateT>=1000){feedState.rate=feedState.msgCount;feedState.msgCount=0;lastRateT=t;}
   if(document.hidden||btActive)return;if(!$("v-term").hidden&&(dirty.data||dirty.all||dirty.tape||dirty.opt||t-lastFull>2000)){flush();lastFull=t;}
   if(!$("v-term").hidden&&t-lastQuant>2000){renderQuant();lastQuant=t;}
@@ -2704,29 +2705,50 @@ if("IntersectionObserver" in window)new IntersectionObserver(es=>{es.forEach(x=>
 document.addEventListener("visibilitychange",()=>{if(!document.hidden){dirty.all=true;NET.need=true;}});
 /* mobile: phones freeze timers and price streams while the app is off screen */
 let mobHidAt=0;document.addEventListener("visibilitychange",()=>{if(document.hidden){mobHidAt=Date.now();return;}const gone=mobHidAt?Math.round((Date.now()-mobHidAt)/60000):0;mobHidAt=0;if(gone>=1&&AUTO.on){botLog("The app was in the background for about "+gone+" min. The bot could not watch prices in that time.","err");dirty.all=true;}});
-/* mobile: find a price source this phone's network can reach, then fetch + stream (no taps) */
-async function mobProbe(u){const c=new AbortController(),t=setTimeout(()=>c.abort(),7000);try{const r=await fetch(u,{signal:c.signal,cache:"no-store"});return r.ok;}catch(e){return false;}finally{clearTimeout(t);}}
-const MOB_SRC={bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time"},
-  binv:{ex:"binance",name:"Binance public mirror (binance.vision)",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time"},
-  dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",probe:"/v2/tickers/BTCUSD"}};
-let mobBusy=false;
-async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;const say=t=>{const e=$("mob-src");if(e)e.textContent=t;};
-  try{say("Finding a live price source…");
-    const order=["dlt","bin","binv"];let pick=null;
-    for(const k of order){const S=MOB_SRC[k];say("Trying "+S.name+"…");if(await mobProbe(S.rest+S.probe)){pick=S;break;}}
-    if(!pick){say("No price source answered. Check the phone has internet (try Wi-Fi or mobile data), then tap Reconnect.");sysMsg("Live prices: Binance, its mirror and Delta India all failed from this network","risk");return;}
+/* mobile: find a price source this phone's network can reach (web request or live stream), then fetch + stream (no taps) */
+async function mobProbe(u){const c=new AbortController(),t=setTimeout(()=>c.abort(),7000);
+  try{const r=await fetch(u,{signal:c.signal,cache:"no-store"});return r.ok?"ok":"HTTP "+r.status;}
+  catch(e){return e.name==="AbortError"?"no answer in 7 s":"blocked (network or browser)";}finally{clearTimeout(t);}}
+function mobWsProbe(u){return new Promise(res=>{let w,done=false;const fin=v=>{if(done)return;done=true;clearTimeout(t);try{w&&w.close();}catch(e){}res(v);};
+  const t=setTimeout(()=>fin("no answer in 7 s"),7000);try{w=new WebSocket(u);w.onopen=()=>fin("ok");w.onerror=()=>fin("blocked");}catch(e){fin("blocked");}});}
+const MOB_SRC={dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",ws:"wss://socket.india.delta.exchange",probe:"/v2/tickers/BTCUSD",wsProbe:"wss://socket.india.delta.exchange"},
+  bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time",wsProbe:"wss://stream.binance.com:9443/ws/btcusdt@bookTicker"},
+  binv:{ex:"binance",name:"Binance mirror",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time",wsProbe:"wss://data-stream.binance.vision/ws/btcusdt@bookTicker"}};
+let mobBusy=false;const MOB_VER="m1.3";
+async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;
+  const say=t=>{const e=$("mob-src");if(e)e.textContent=t;},diag=[];const showDiag=()=>{const e=$("mob-diag");if(e)e.textContent=diag.join("\n")+"\napp "+MOB_VER;};
+  try{say("Finding a live price source…");let pick=null,restOk=false;
+    for(const k of ["dlt","bin","binv"]){const S=MOB_SRC[k];say("Trying "+S.name+"…");
+      const [r,w]=await Promise.all([mobProbe(S.rest+S.probe),mobWsProbe(S.wsProbe)]);
+      diag.push(S.name+": prices "+(r==="ok"?"✓":"✗ "+r)+" · live stream "+(w==="ok"?"✓":"✗ "+w));showDiag();
+      if(r==="ok"||w==="ok"){pick=S;restOk=r==="ok";break;}}
+    if(!pick){say("No price source answered from this network. Switch between Wi-Fi and mobile data, then tap Reconnect.");sysMsg("Live prices: Delta India, Binance and its mirror all failed from this network","risk");return;}
     const exChanged=pick.ex!==cfg.ex;cfg.ex=pick.ex;
-    if(pick.ex==="binance"){cfg.binRest=pick.rest;cfg.binWs=pick.ws;cfg.useFut=await mobProbe(cfg.binFut+"/fapi/v1/time");}
-    else cfg.deltaRest=pick.rest;
+    if(pick.ex==="binance"){cfg.binRest=pick.rest;cfg.binWs=pick.ws;cfg.useFut=(await mobProbe(cfg.binFut+"/fapi/v1/time"))==="ok";}
+    else{cfg.deltaRest=pick.rest;cfg.deltaWs=pick.ws;}
     saveCfg();
     if(exChanged){buildUniverse();buildNet();fillSymSelect();account=null;DLT.products=null;regCache.t=-1;setMode("live");}
-    say("Live prices from "+pick.name);
-    await refreshRest();if(!feedState.connected)connectFeed();
-  }finally{mobBusy=false;dirty.all=true;}}
+    say("Live prices from "+pick.name+(restOk?"":" (stream only)"));
+    if(restOk){try{await refreshRest();}catch(e){}}
+    if(!feedState.connected&&!ws)connectFeed();
+  }finally{mobBusy=false;dirty.all=true;showDiag();}}
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&mode==="live"&&!feedState.connected)mobConnect();});
 setTimeout(()=>{if(mode==="live")mobConnect();},700);
 (function(){const b=document.getElementById("mob-reconnect");if(b)b.addEventListener("click",()=>{if(mode!=="live")setMode("live");closeFeed();mobConnect();});
   $("mode").addEventListener("change",()=>{if($("mode").value==="live")setTimeout(mobConnect,300);});})();
+/* mobile: India time with seconds and milliseconds */
+(function(){const el=$("clock-ist");const p=(n,w)=>String(n).padStart(w,"0");
+  setInterval(()=>{if(document.hidden||!el)return;const d=new Date(now()+19800000);
+    el.textContent="IST "+p(d.getUTCHours(),2)+":"+p(d.getUTCMinutes(),2)+":"+p(d.getUTCSeconds(),2)+"."+p(d.getUTCMilliseconds(),3);},47);})();
+/* mobile: reset the paper book so a strategy test can start again */
+let mobResetArm=0;
+function mobResetPaper(){const m=$("au-msg");const say=(t,c)=>{if(m){m.className="msg "+(c||"");m.textContent=t;}};
+  if(Date.now()-mobResetArm>5000){mobResetArm=Date.now();say("Tap Reset paper again within 5 s to clear all paper trades, P&L, the daily loss stop and the drawdown peak.","dn");return;}
+  mobResetArm=0;stopAuto("paper reset");
+  for(const k in scanOpen)delete scanOpen[k];for(const k in scanCnt)delete scanCnt[k];for(const k in AUTO.pos)delete AUTO.pos[k];
+  AUTO.log.length=0;AUTO.errs=0;AUTO.orders=0;AUTO.stopWhy=null;AUTO.backoffUntil=0;AUTO.hFail=0;
+  journal.splice(0,journal.length);store.set("journal",journal);hwm={};breach={};store.set("hwm",hwm);store.set("breach",breach);
+  dirty.all=true;try{renderAuto();}catch(e){}flush();say("Paper book reset: no trades, P&L 0, loss limit cleared. Tap Start to begin again.","up");}
 
 
 /* ---------- start ---------- */
