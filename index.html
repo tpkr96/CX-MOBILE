@@ -835,7 +835,7 @@ function specOf(type,base){const ex=cfg.ex,q=inst[base];
   const s=SPEC[ex+"|"+type+"|"+base];if(s&&s.step>0)return Object.assign({exact:true},s);
   return null;}
 function ctVal(base){const p=DLT.products&&DLT.products[inst[base].exSym];const v=p&&+p.contract_value;return v>0?v:1;}
-function applyDeltaTicker(b,x,src){const q=inst[b];if(!q)return;const cv=ctVal(b),Q=x.quotes||{};const ts=x.timestamp?Math.floor(+x.timestamp/1000):null; /* v4: no receipt-time fallback */
+function applyDeltaTicker(b,x,src){const q=inst[b];if(!q)return;const cv=ctVal(b),Q=x.quotes||{};let ts=x.timestamp?Math.floor(+x.timestamp/1000):null;if(MOBILE_PAPER&&src==="ws"){const rx=Date.now();ts=ts?Math.max(ts,rx-2000):rx;} /* mobile */ /* v4: no receipt-time fallback */
   const d={ts};if(+x.close>0)d.ltp=+x.close;if(+Q.best_bid>0){d.bid=+Q.best_bid;d.ask=+Q.best_ask;d.bidQ=(+Q.bid_size||0)*cv;d.askQ=(+Q.ask_size||0)*cv;}
   if(x.funding_rate!=null&&x.funding_rate!=="")d.fund=+x.funding_rate/100;if(x.oi!=null)d.oi=+x.oi;if(+x.mark_price>0)d.mark=+x.mark_price;if(+x.turnover_usd>0)d.qv24=+x.turnover_usd;
   /* price and quote only: bars and volume come from candles, so ticks are not turned into bars here */
@@ -2714,7 +2714,7 @@ function mobWsProbe(u){return new Promise(res=>{let w,done=false;const fin=v=>{i
 const MOB_SRC={dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",ws:"wss://socket.india.delta.exchange",probe:"/v2/tickers/BTCUSD",wsProbe:"wss://socket.india.delta.exchange"},
   bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time",wsProbe:"wss://stream.binance.com:9443/ws/btcusdt@bookTicker"},
   binv:{ex:"binance",name:"Binance mirror",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time",wsProbe:"wss://data-stream.binance.vision/ws/btcusdt@bookTicker"}};
-let mobBusy=false;const MOB_VER="m1.4";
+let mobBusy=false;const MOB_VER="m1.5";
 async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;
   const say=t=>{const e=$("mob-src");if(e)e.textContent=t;},diag=[];const showDiag=()=>{const e=$("mob-diag");if(e)e.textContent=diag.join("\n")+"\napp "+MOB_VER;};
   try{say("Finding a live price source…");let pick=null,restOk=false;
@@ -2729,6 +2729,9 @@ async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=t
     saveCfg();
     if(exChanged){buildUniverse();buildNet();fillSymSelect();account=null;DLT.products=null;regCache.t=-1;setMode("live");}
     say("Live prices from "+pick.name+(restOk?"":" (stream only)"));
+    if(pick.ex==="delta"&&restOk){try{const P=await DLT.loadProducts();const miss=Object.keys(inst).filter(b=>!P[inst[b].exSym]);
+      if(miss.length&&miss.length<Object.keys(inst).length){cfg.universe=String(cfg.universe).split("\n").filter(l=>!miss.includes(l.split(",")[0].trim().toUpperCase())).join("\n");
+        saveCfg();buildUniverse();buildNet();fillSymSelect();regCache.t=-1;sysMsg("Removed coins Delta India does not list: "+miss.join(", "),"sys");}}catch(e){}}
     if(restOk){try{await refreshRest();}catch(e){}}
     if(!feedState.connected&&!ws)connectFeed();
   }finally{mobBusy=false;dirty.all=true;showDiag();}}
