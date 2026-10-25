@@ -198,7 +198,8 @@ table.chain td.itm{background:#0b1524}
   .tabs{position:fixed;left:0;right:0;bottom:0;z-index:60;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:0;border:0;border-top:1px solid var(--ln2);background:var(--p);padding:0 env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
   .tabs button{min-height:54px;padding:6px 2px;font-size:10.5px;letter-spacing:.03em}
   .tabs .tl{display:none}.tabs .ts{display:inline}
-  #clock-ist,.hdr .lb[for="mode"]{display:none}
+  .hdr .lb[for="mode"],#utc-lb,#clock{display:none}
+  #clock-ist{font:600 13px var(--f-num);color:var(--tx)}
   #mode{flex:1 1 160px;min-width:0}
   .btn,.s,.money{min-height:38px}
   input,select,textarea{font-size:16px}
@@ -235,7 +236,7 @@ table.chain td.itm{background:#0b1524}
   </span>
   <button class="money" id="hdr-money" type="button" title="Which money the bot uses. Change it on the Auto 360 tab.">PAPER · bot off</button>
   <button class="btn" id="btn-install" type="button">Install app</button><button class="btn" id="btn-wake" type="button" aria-pressed="false" title="Stops the phone screen from sleeping while the bot runs">Keep screen on</button><span class="sp"></span>
-  <span class="lb">UTC</span><span class="clock" id="clock">--:--:--</span><span class="lb" id="clock-ist" style="margin-left:4px"></span>
+  <span class="lb" id="utc-lb">UTC</span><span class="clock" id="clock">--:--:--</span><span class="lb" id="clock-ist" style="margin-left:4px"></span>
 </header>
 
 <div class="strip" id="strip">
@@ -523,7 +524,7 @@ function computeWeights(){const syms=Object.keys(inst).filter(s=>!(typeof datase
 let wSrc="";function wSrcNote(){return wSrc||"24h quote volume";}
 
 /* modes: sim | replay | live */
-let mode=store.get("mode","sim");if(!["sim","replay","live"].includes(mode))mode="sim";
+let mode=store.get("mode","live");if(!store.get("mobLive1",false)){mode="live";store.set("mode","live");store.set("mobLive1",true);}if(!["sim","replay","live"].includes(mode))mode="sim";
 let simClock=null; /* ms, for sim and replay */
 let snapAt=null; /* v3: decision timestamp while a bar-close decision runs on its point-in-time snapshot */
 let btActive=false; /* v3: true while a backtest runs; live feeds, timers, alerts and replay are kept out */
@@ -2742,6 +2743,9 @@ window.__cxt={inst,IX,bars,triggers,tape,journal:()=>journal,cfg:()=>cfg,ingest,
   window.addEventListener("beforeinstallprompt",function(e){e.preventDefault();deferred=e;if(ib)ib.style.display="inline-block";});
   window.addEventListener("appinstalled",function(){if(ib)ib.style.display="none";});
   if(ib)ib.addEventListener("click",function(){if(!deferred)return;deferred.prompt();deferred.userChoice.finally(function(){deferred=null;ib.style.display="none";});});
+  /* live mode: fetch history and open the price stream automatically */
+  setTimeout(function(){var m=document.getElementById("mode");if(m&&m.value==="live"){var f=document.getElementById("btn-fetch"),c=document.getElementById("btn-feed");
+    if(f)f.click();setTimeout(function(){if(c&&/connect/i.test(c.textContent))c.click();},1500);}},800);
   /* offline shell; only on https (GitHub Pages), never on file:// */
   if("serviceWorker" in navigator&&location.protocol==="https:"){navigator.serviceWorker.register("sw.js").catch(function(){});}
 })();
