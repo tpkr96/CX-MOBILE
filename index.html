@@ -2631,7 +2631,7 @@ function flush(){if(btActive){dirty.all=true;return;} /* v4: never render a back
 let lastFull=0,lastQuant=0;
 function loop(){const t=Date.now();setText($("clock"),tstr(now())+((mode==="sim"||mode==="replay")?" "+mode:""));
   if(feedState.connected&&t-lastRateT>=1000){feedState.rate=feedState.msgCount;feedState.msgCount=0;lastRateT=t;}
-  if(document.hidden||btActive)return;if(!$("v-term").hidden&&(dirty.data||dirty.all||dirty.tape||dirty.opt||t-lastFull>2000)){flush();lastFull=t;}
+  if(document.hidden||btActive)return;if((!$("v-term").hidden&&(dirty.data||dirty.all||dirty.tape||dirty.opt))||t-lastFull>(!$("v-term").hidden?2000:1000)){flush();lastFull=t;}
   if(!$("v-term").hidden&&t-lastQuant>2000){renderQuant();lastQuant=t;}
   if(!$("v-auto").hidden&&t-lastAuto>=1000){renderAuto();lastAuto=t;}
   if(!$("v-acct").hidden&&t-lastAcct>=1000){renderAcct();lastAcct=t;}
@@ -2714,7 +2714,7 @@ function mobWsProbe(u){return new Promise(res=>{let w,done=false;const fin=v=>{i
 const MOB_SRC={dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",ws:"wss://socket.india.delta.exchange",probe:"/v2/tickers/BTCUSD",wsProbe:"wss://socket.india.delta.exchange"},
   bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time",wsProbe:"wss://stream.binance.com:9443/ws/btcusdt@bookTicker"},
   binv:{ex:"binance",name:"Binance mirror",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time",wsProbe:"wss://data-stream.binance.vision/ws/btcusdt@bookTicker"}};
-let mobBusy=false;const MOB_VER="m1.3";
+let mobBusy=false;const MOB_VER="m1.4";
 async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;
   const say=t=>{const e=$("mob-src");if(e)e.textContent=t;},diag=[];const showDiag=()=>{const e=$("mob-diag");if(e)e.textContent=diag.join("\n")+"\napp "+MOB_VER;};
   try{say("Finding a live price source…");let pick=null,restOk=false;
