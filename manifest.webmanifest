@@ -2,7 +2,7 @@
   "name": "Crypto Terminal Mobile",
   "short_name": "CX Bot",
   "description": "Paper-trading crypto terminal and 360 scanner bot (no real orders).",
-  "start_url": "./",
+  "start_url": "index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
