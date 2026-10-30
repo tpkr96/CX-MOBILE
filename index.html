@@ -192,6 +192,7 @@ table.chain td.itm{background:#0b1524}
 .mob-srcbar{display:flex;align-items:center;gap:8px;flex:1 1 100%;font:12px var(--f-num);color:var(--tx2)}.mob-srcbar span{flex:1;min-width:0}
 .mob-diag{flex:1 1 100%;margin:0;font:11px/1.4 var(--f-num);color:var(--tx2);white-space:pre-wrap}.mob-diag:empty{display:none}
 .strip-more{display:none;width:100%;padding:6px;border:0;border-bottom:1px solid var(--ln);background:var(--p);color:var(--tx2);font:11px var(--f-num);letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
+#sv-box{min-width:0;max-width:100%;overflow:hidden}#sv-box .kv{grid-template-columns:minmax(96px,38%) minmax(0,1fr)}#sv-box .kv dt{white-space:normal}#sv-box .kv dd{white-space:normal;overflow-wrap:anywhere}#sv-box .msg,#sv-box .am{white-space:normal;overflow-wrap:anywhere}
 .mob-note{margin:0 0 8px;padding:8px 10px;border:1px solid var(--am);background:var(--am2);color:var(--am);font:12px/1.4 var(--f-num)}
 @media (max-width:700px){
   body{padding-bottom:calc(62px + env(safe-area-inset-bottom,0px))}
@@ -210,6 +211,360 @@ table.chain td.itm{background:#0b1524}
   .strip-more{display:block}
 }
 </style>
+<script>
+/* CX-MOBILE strategy validation engine (cxval). One file, no dependencies; the same code runs in the phone app
+   (window.CXVAL) and in Node for the full historical validation and the automated tests (require("./cxval.js")).
+   It never places orders. It only reads candles and funding rates and reports what a strategy would have done.
+
+   Rules this engine enforces (each one has a test in tests/validation_test.js):
+   - Data integrity: bars are sorted, de-duplicated, OHLC-checked and gap-scanned before use; bad bars are dropped and counted.
+   - Candle alignment: higher-timeframe candles are built only from COMPLETE buckets aligned to UTC epoch multiples
+     (4h = 00,04,08,12,16,20 UTC). A bucket with a missing sub-bar, or one still in progress, is never used.
+   - No look-ahead: a signal uses only candles that have closed. It is acted on at the open of the first execution bar
+     that starts at or after the signal candle's close (plus an optional extra delay). Stops and trailing stops are
+     checked against a bar before that bar's own high/low can move them.
+   - Spot and futures are separate: spot is long-only, pays spot fees and no funding; perpetuals pay perp fees and the
+     real funding series. Passing funding to a spot run, or mixing markets in one run, is refused.
+   - Costs: taker fee per side + GST on the fee, slippage on every fill (worse price), funding charged at each
+     settlement while a perp position is open (long pays a positive rate), extra slippage when a coin is delisted.
+   - Accounting: every trade's net = gross - fees - funding, equity moves only by trade nets, and the totals reconcile. */
+(function (root, factory) {
+  if (typeof module === "object" && module.exports) module.exports = factory();
+  else root.CXVAL = factory();
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+  const HOUR = 3600e3, DAY = 24 * HOUR;
+
+  /* ---------- 1. data integrity ---------- */
+  /* bars: [{t (open time, ms UTC), o, h, l, c, v}] in any order. stepMs: the bar size.
+     Returns cleaned bars (sorted, unique, valid) and a report of everything that was wrong. */
+  function cleanBars(bars, stepMs, opt) {
+    opt = opt || {};
+    const rep = { input: bars.length, outOfOrder: 0, duplicates: 0, conflictingDuplicates: 0, badOHLC: 0, nonPositive: 0,
+      misaligned: 0, gaps: 0, missingBars: 0, gapList: [], spikes: 0, first: null, last: null, kept: 0 };
+    for (let i = 1; i < bars.length; i++) if (bars[i].t < bars[i - 1].t) rep.outOfOrder++;
+    const s = bars.slice().sort((a, b) => a.t - b.t), out = [];
+    for (const b of s) {
+      const o = +b.o, h = +b.h, l = +b.l, c = +b.c, t = +b.t;
+      if (![o, h, l, c, t].every(Number.isFinite)) { rep.badOHLC++; continue; }
+      if (o <= 0 || h <= 0 || l <= 0 || c <= 0) { rep.nonPositive++; continue; }
+      if (h < Math.max(o, c) - 1e-12 || l > Math.min(o, c) + 1e-12 || h < l) { rep.badOHLC++; continue; }
+      if (t % stepMs !== 0) { rep.misaligned++; continue; }
+      const prev = out[out.length - 1];
+      if (prev && prev.t === t) {
+        rep.duplicates++;
+        if (prev.o !== o || prev.h !== h || prev.l !== l || prev.c !== c) rep.conflictingDuplicates++;
+        continue; /* keep the first copy */
+      }
+      out.push({ t, o, h, l, c, v: +b.v || 0 });
+    }
+    const spikeX = opt.spikeX || 0.5; /* a single bar range above 50% of price is flagged, not removed */
+    for (let i = 0; i < out.length; i++) {
+      if (i && out[i].t - out[i - 1].t > stepMs) {
+        const miss = (out[i].t - out[i - 1].t) / stepMs - 1;
+        rep.gaps++; rep.missingBars += miss;
+        if (rep.gapList.length < 20) rep.gapList.push({ from: out[i - 1].t + stepMs, to: out[i].t, missing: miss });
+      }
+      if ((out[i].h - out[i].l) / out[i].l > spikeX) rep.spikes++;
+    }
+    rep.kept = out.length; rep.first = out.length ? out[0].t : null; rep.last = out.length ? out[out.length - 1].t : null;
+    if (opt.nowMs != null && out.length) rep.lastAgeMs = opt.nowMs - (rep.last + stepMs);
+    return { bars: out, rep };
+  }
+  /* Is a live series usable right now? The last CLOSED bar must have closed within maxAge. */
+  function feedHealth(rep, stepMs, nowMs, maxAgeMs) {
+    const why = [];
+    if (!rep || !rep.kept) why.push("no candles");
+    else {
+      const age = nowMs - (rep.last + stepMs);
+      if (age > (maxAgeMs == null ? 2 * stepMs : maxAgeMs)) why.push("last candle closed " + Math.round(age / 60000) + " min ago (stale)");
+      if (rep.conflictingDuplicates) why.push(rep.conflictingDuplicates + " conflicting duplicate candles");
+    }
+    return { ok: !why.length, why };
+  }
+
+  /* ---------- 2. candle alignment ---------- */
+  /* Build tfMs candles from stepMs candles. Buckets start at multiples of tfMs since the Unix epoch (UTC).
+     Only complete buckets are returned; nowMs (optional) drops a bucket that has not closed yet. */
+  function resample(bars, stepMs, tfMs, nowMs) {
+    if (tfMs % stepMs) throw new Error("timeframe " + tfMs + " is not a multiple of bar size " + stepMs);
+    const need = tfMs / stepMs, out = [];
+    let dropped = 0, inProgress = 0, cur = null, cnt = 0;
+    const flush = () => {
+      if (!cur) return;
+      if (nowMs != null && cur.t + tfMs > nowMs) inProgress++;
+      else if (cnt === need) out.push(cur);
+      else dropped++;
+    };
+    for (const b of bars) {
+      const k = Math.floor(b.t / tfMs) * tfMs;
+      if (!cur || k !== cur.t) { flush(); cur = { t: k, o: b.o, h: b.h, l: b.l, c: b.c, v: b.v || 0 }; cnt = 1; }
+      else { cur.h = Math.max(cur.h, b.h); cur.l = Math.min(cur.l, b.l); cur.c = b.c; cur.v += b.v || 0; cnt++; }
+    }
+    flush();
+    return { bars: out, incomplete: dropped, inProgress };
+  }
+
+  /* ---------- 3. indicators (value at i uses bars 0..i only) ---------- */
+  function atr(bars, n) {
+    const tr = bars.map((b, i) => i ? Math.max(b.h - b.l, Math.abs(b.h - bars[i - 1].c), Math.abs(b.l - bars[i - 1].c)) : b.h - b.l);
+    const out = new Array(bars.length).fill(NaN);
+    let s = 0;
+    for (let i = 0; i < bars.length; i++) {
+      s += tr[i];
+      if (i >= n) s -= tr[i - n];
+      if (i >= n) out[i] = s / n; /* research used a 14-bar mean of TR with the first TR needing a previous close */
+    }
+    return out;
+  }
+
+  /* ---------- 4. strategy: 4h Donchian trend breakout (pre-registered in stocks/v7/research) ---------- */
+  const DEFAULTS = {
+    tfMs: 4 * HOUR, N: 55, atrN: 14, kStop: 2.0, kTrail: 5.0, maxHoldMs: 30 * DAY, delayBars: 0,
+    market: "perp", allowShort: true,
+    feeBps: 5, gstPct: 18, slipBps: 5, spotFeeBps: 10, delistSlipPct: 2, fundingMult: 1,
+    capital: 1000, riskPct: 0.5, maxOpen: 3, maxLev: 2, killPct: 30, minNotional: 0,
+    startMs: null, endMs: null
+  };
+  function signals(sig, p) {
+    const a = atr(sig, p.atrN), out = [];
+    for (let i = Math.max(p.N, p.atrN); i < sig.length; i++) {
+      const A = a[i];
+      if (!Number.isFinite(A) || A <= 0) continue;
+      if (sig[i].t - sig[i - p.N].t !== p.N * p.tfMs) continue; /* channel must span N consecutive candles: no gap inside */
+      let up = -Infinity, dn = Infinity;
+      for (let k = i - p.N; k < i; k++) { if (sig[k].h > up) up = sig[k].h; if (sig[k].l < dn) dn = sig[k].l; }
+      const c = sig[i].c, decideT = sig[i].t + p.tfMs; /* known only when candle i has closed */
+      if (c > up) out.push({ d: 1, decideT, sigClose: c, stop: c - p.kStop * A, trail: p.kTrail * A, atr: A });
+      else if (c < dn) out.push({ d: -1, decideT, sigClose: c, stop: c + p.kStop * A, trail: p.kTrail * A, atr: A });
+    }
+    return out;
+  }
+
+  /* ---------- 5. regimes from BTC daily closes, known at the start of each day ---------- */
+  function regimeFn(btcDaily) {
+    const map = new Map(), c = btcDaily.map(b => b.c);
+    for (let i = 220; i < btcDaily.length; i++) {
+      let s = 0, s20 = 0;
+      for (let k = i - 200; k < i; k++) s += c[k];
+      for (let k = i - 220; k < i - 20; k++) s20 += c[k];
+      const sma = s / 200, sma20ago = s20 / 200, last = c[i - 1]; /* only days before day i */
+      const r = last > sma && sma > sma20ago ? "bull" : last < sma && sma < sma20ago ? "bear" : "sideways";
+      map.set(btcDaily[i].t, r);
+    }
+    return t => map.get(Math.floor(t / DAY) * DAY) || "unknown";
+  }
+
+  /* ---------- 6. portfolio simulation ---------- */
+  /* data: {market:"perp"|"spot", coins:{SYM:{exec:[bars], execStepMs, sig:[tf bars] (optional; built from exec), funding:[{t, rate}] (perp only),
+            delisted:boolean, step:qty step (optional)}}} */
+  function simulate(data, params) {
+    const p = Object.assign({}, DEFAULTS, params || {});
+    if (data.market !== p.market) throw new Error("market mismatch: data is " + data.market + ", run is " + p.market + " (spot and futures are never mixed)");
+    const spot = p.market === "spot";
+    const syms = Object.keys(data.coins).sort();
+    const C = {}, events = [];
+    for (const s of syms) {
+      const d = data.coins[s];
+      if (spot && d.funding && d.funding.length) throw new Error(s + ": funding rates given for a spot run (spot pays no funding)");
+      const step = d.execStepMs || HOUR;
+      const sig = d.sig || resample(d.exec, step, p.tfMs).bars;
+      let sg = signals(sig, p);
+      if (spot || !p.allowShort) sg = sg.filter(x => x.d > 0);
+      if (p.startMs != null) sg = sg.filter(x => x.decideT >= p.startMs);
+      if (p.endMs != null) sg = sg.filter(x => x.decideT < p.endMs);
+      const fund = (d.funding || []).slice().sort((a, b) => a.t - b.t);
+      C[s] = { s, exec: d.exec, step, sg, si: 0, fund, fi: 0, pos: null, delisted: !!d.delisted, qStep: d.step || 0, last: d.exec.length ? d.exec[d.exec.length - 1].t : -Infinity };
+      for (let i = 0; i < d.exec.length; i++) events.push(d.exec[i].t);
+    }
+    const times = Array.from(new Set(events)).sort((a, b) => a - b);
+    const endT = p.endMs != null ? p.endMs + p.maxHoldMs : Infinity; /* trades opened before endMs may finish */
+    const ptr = {};
+    syms.forEach(s => (ptr[s] = 0));
+    const feeRate = (spot ? p.spotFeeBps : p.feeBps) / 1e4 * (1 + p.gstPct / 100), slip = p.slipBps / 1e4;
+    let cash = p.capital, peak = p.capital, killed = null;
+    const trades = [], curve = [], skipped = { busy: 0, maxOpen: 0, killed: 0, tooSmall: 0, levCap: 0, noBar: 0 };
+    const open = () => syms.filter(s => C[s].pos);
+    const mtm = () => cash + open().reduce((a, s) => { const q = C[s].pos; return a + q.d * q.qty * (q.mark - q.entry) - q.fundPaid; }, 0);
+    const close = (c, px, t, why, extraSlip) => {
+      const q = c.pos, d = q.d, s = (extraSlip || 0) / 100;
+      const exit = px * (1 - d * slip) * (1 - d * s);
+      const gross = d * q.qty * (exit - q.entry);
+      const fees = q.feeIn + q.qty * exit * feeRate;
+      const net = gross - fees - q.fundPaid;
+      cash += gross - q.qty * exit * feeRate - q.fundPaid; /* the entry fee was taken from cash when the trade opened */
+      trades.push({ sym: c.s, d, sigT: q.sigT, tin: q.tin, entry: q.entry, stop0: q.stop0, tout: t, exit, why, qty: q.qty,
+        notional: q.qty * q.entry, fees, funding: q.fundPaid, gross, net, riskAmt: q.riskAmt, R: net / q.riskAmt,
+        netPct: net / (q.qty * q.entry) * 100, grossPct: gross / (q.qty * q.entry) * 100, bars: q.bars, eqBefore: q.eqBefore });
+      c.pos = null;
+    };
+    for (const t of times) {
+      if (t > endT) break;
+      /* (a) entries at this bar's open, into slots freed before t */
+      for (const s of syms) {
+        const c = C[s];
+        while (c.si < c.sg.length && c.sg[c.si].decideT + p.delayBars * p.tfMs <= t) {
+          const g = c.sg[c.si++];
+          const bar = c.exec[ptr[s]];
+          if (!bar || bar.t !== t) {
+            /* this coin has no bar at t; the first bar it does have is used if it is the next one */
+            const nb = c.exec[ptr[s]];
+            if (!nb || nb.t - (g.decideT + p.delayBars * p.tfMs) > c.step) { skipped.noBar++; continue; }
+            c.sg[--c.si] = g; break;
+          }
+          if (c.pos) { skipped.busy++; continue; }
+          if (killed) { skipped.killed++; continue; }
+          if (open().length >= p.maxOpen) { skipped.maxOpen++; continue; }
+          const entry = bar.o * (1 + g.d * slip);
+          const stop = g.stop;
+          const dist = g.d * (entry - stop);
+          if (!(dist > 0)) { skipped.tooSmall++; continue; } /* opened beyond the stop already */
+          const riskAmt = cash * p.riskPct / 100;
+          let qty = riskAmt / dist;
+          const usedNotional = open().reduce((a, k) => a + C[k].pos.qty * C[k].pos.mark, 0);
+          const room = Math.max(0, cash * p.maxLev - usedNotional);
+          if (qty * entry > room) { qty = room / entry; skipped.levCap++; }
+          if (c.qStep) qty = Math.floor(qty / c.qStep) * c.qStep;
+          if (!(qty > 0) || qty * entry < p.minNotional) { skipped.tooSmall++; continue; }
+          const feeIn = qty * entry * feeRate;
+          cash -= feeIn;
+          c.pos = { d: g.d, sigT: g.decideT - p.tfMs, tin: t, entry, stop0: stop, stop, trail: g.trail, hi: entry, lo: entry, qty, feeIn,
+            fundPaid: 0, riskAmt: qty * dist, mark: entry, bars: 0, eqBefore: cash + feeIn, maxT: t + p.maxHoldMs };
+          while (c.fi < c.fund.length && c.fund[c.fi].t <= t) c.fi++; /* funding at the entry instant is not owed */
+        }
+      }
+      /* (b) manage open positions on this bar */
+      for (const s of syms) {
+        const c = C[s], bar = c.exec[ptr[s]];
+        if (!bar || bar.t !== t) continue;
+        ptr[s]++;
+        const q = c.pos;
+        if (!q) continue;
+        q.bars++;
+        if (!spot) while (c.fi < c.fund.length && c.fund[c.fi].t <= t) { /* settlement at this bar's open: position was open */
+          q.fundPaid += q.d * q.qty * bar.o * c.fund[c.fi].rate * p.fundingMult; c.fi++;
+        }
+        if (q.d > 0 && bar.l <= q.stop) { close(c, Math.min(bar.o, q.stop), t, q.stop > q.stop0 ? "trail" : "stop"); continue; }
+        if (q.d < 0 && bar.h >= q.stop) { close(c, Math.max(bar.o, q.stop), t, q.stop < q.stop0 ? "trail" : "stop"); continue; }
+        if (t + c.step >= q.maxT) { close(c, bar.c, t + c.step, "time"); continue; }
+        /* only now may this bar's range move the trailing stop (it applies from the next bar) */
+        q.hi = Math.max(q.hi, bar.h); q.lo = Math.min(q.lo, bar.l);
+        q.stop = q.d > 0 ? Math.max(q.stop, q.hi - q.trail) : Math.min(q.stop, q.lo + q.trail);
+        q.mark = bar.c;
+        if (t === c.last) close(c, bar.c, t + c.step, c.delisted ? "delisted" : "end of data", c.delisted ? p.delistSlipPct : 0);
+      }
+      const eq = mtm();
+      if (eq > peak) peak = eq;
+      if (!killed && eq <= p.capital * (1 - p.killPct / 100)) killed = { t, eq };
+      curve.push([t, eq]);
+    }
+    for (const s of syms) if (C[s].pos) close(C[s], C[s].pos.mark, times[times.length - 1] + C[s].step, "end of data");
+    const recon = { start: p.capital, end: cash, sumNet: trades.reduce((a, x) => a + x.net, 0) };
+    recon.diff = recon.end - recon.start - recon.sumNet;
+    return { params: p, trades, curve, skipped, killed, recon, signals: syms.reduce((a, s) => a + C[s].sg.length, 0) };
+  }
+
+  /* ---------- 7. statistics ---------- */
+  function rng(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  function dailyReturns(curve) {
+    const byDay = new Map();
+    for (const [t, eq] of curve) byDay.set(Math.floor(t / DAY), eq);
+    const v = Array.from(byDay.values()), r = [];
+    for (let i = 1; i < v.length; i++) r.push(v[i] / v[i - 1] - 1);
+    return r;
+  }
+  function maxDD(curve) {
+    let pk = -Infinity, dd = 0, at = null;
+    for (const [t, eq] of curve) { if (eq > pk) pk = eq; const x = (pk - eq) / pk; if (x > dd) { dd = x; at = t; } }
+    return { pct: dd * 100, at };
+  }
+  /* trades: from simulate (or a filtered subset). curve: optional equity curve for drawdown % and Sharpe. */
+  function metrics(trades, curve, opt) {
+    opt = opt || {};
+    const n = trades.length, R = trades.map(x => x.R), net = trades.map(x => x.net);
+    const m = { n };
+    if (!n) return m;
+    const sum = a => a.reduce((x, y) => x + y, 0), mean = a => sum(a) / a.length;
+    const sd = a => { const u = mean(a); return a.length > 1 ? Math.sqrt(sum(a.map(x => (x - u) * (x - u))) / (a.length - 1)) : 0; };
+    const win = net.filter(x => x > 0), loss = net.filter(x => x < 0);
+    m.winPct = win.length / n * 100;
+    m.expR = mean(R);
+    m.avgNetPct = mean(trades.map(x => x.netPct));
+    m.avgGrossPct = mean(trades.map(x => x.grossPct));
+    m.net = sum(net); m.fees = sum(trades.map(x => x.fees)); m.funding = sum(trades.map(x => x.funding));
+    m.pf = loss.length ? sum(win) / -sum(loss) : null;
+    m.avgWinR = win.length ? mean(trades.filter(x => x.net > 0).map(x => x.R)) : null;
+    m.avgLossR = loss.length ? mean(trades.filter(x => x.net < 0).map(x => x.R)) : null;
+    const s = sd(R); m.sdR = s; m.tStat = s ? m.expR / (s / Math.sqrt(n)) : null;
+    let st = 0, mx = 0, cum = 0, pk = 0, ddR = 0;
+    const byExit = trades.slice().sort((a, b) => a.tout - b.tout);
+    for (const x of byExit) { st = x.net < 0 ? st + 1 : 0; mx = Math.max(mx, st); cum += x.R; pk = Math.max(pk, cum); ddR = Math.min(ddR, cum - pk); }
+    m.loseStreak = mx; m.maxDDR = ddR;
+    const sorted = R.slice().sort((a, b) => b - a);
+    m.sumR = sum(R); m.sumRwithoutTop10 = sum(sorted.slice(10));
+    /* bootstrap 95% interval of the mean R (seeded, so the same data gives the same interval) */
+    const rand = rng(opt.seed || 7), B = opt.boot || 2000, bm = [];
+    for (let b = 0; b < B; b++) { let a = 0; for (let i = 0; i < n; i++) a += R[(rand() * n) | 0]; bm.push(a / n); }
+    bm.sort((a, b) => a - b);
+    m.expR_lo95 = bm[Math.floor(B * 0.025)]; m.expR_hi95 = bm[Math.floor(B * 0.975)];
+    /* Monte Carlo: reshuffle trade order to see how deep the R drawdown can plausibly get */
+    const dds = [];
+    for (let b = 0; b < (opt.mc || 1000); b++) {
+      const a = R.slice();
+      for (let i = a.length - 1; i > 0; i--) { const j = (rand() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; }
+      let c = 0, p2 = 0, d = 0;
+      for (const x of a) { c += x; p2 = Math.max(p2, c); d = Math.min(d, c - p2); }
+      dds.push(d);
+    }
+    dds.sort((a, b) => a - b);
+    m.mcDDR_p95 = dds[Math.floor(dds.length * 0.05)];
+    const months = new Map();
+    for (const x of trades) { const k = new Date(x.tin).toISOString().slice(0, 7); months.set(k, (months.get(k) || 0) + x.net); }
+    m.monthsPositive = Array.from(months.values()).filter(v => v > 0).length; m.months = months.size;
+    if (curve && curve.length > 1) {
+      const r = dailyReturns(curve), u = mean(r), v = sd(r), dn = Math.sqrt(sum(r.map(x => Math.min(0, x) ** 2)) / r.length);
+      m.sharpe = v ? u / v * Math.sqrt(365) : null; m.sortino = dn ? u / dn * Math.sqrt(365) : null;
+      const dd = maxDD(curve); m.maxDDPct = dd.pct; m.maxDDAt = dd.at;
+      const yrs = (curve[curve.length - 1][0] - curve[0][0]) / (365 * DAY);
+      m.retPct = (curve[curve.length - 1][1] / curve[0][1] - 1) * 100;
+      m.cagrPct = yrs > 0 ? (Math.pow(curve[curve.length - 1][1] / curve[0][1], 1 / yrs) - 1) * 100 : null;
+    }
+    return m;
+  }
+  function round(m, k) { const o = {}; for (const x in m) o[x] = typeof m[x] === "number" ? +m[x].toFixed(k == null ? 4 : k) : m[x]; return o; }
+
+  /* ---------- 8. pass / fail ---------- */
+  /* Criteria were written down before any validation run (see VALIDATION_REPORT.md section 2). */
+  const CRITERIA = [
+    { id: "C1", text: "Out-of-sample trades ≥ 100", f: v => v.oos.n >= 100 },
+    { id: "C2", text: "Out-of-sample net expectancy > 0 R after fees, GST, slippage and funding", f: v => v.oos.expR > 0 },
+    { id: "C3", text: "Out-of-sample profit factor ≥ 1.15", f: v => v.oos.pf != null && v.oos.pf >= 1.15 },
+    { id: "C4", text: "Bootstrap 95% lower bound of out-of-sample expectancy > 0 R (not luck)", f: v => v.oos.expR_lo95 > 0 },
+    { id: "C5", text: "Still profitable with fees and slippage doubled", f: v => v.stress.costs2x.expR > 0 },
+    { id: "C6", text: "Still profitable when entries are one 4h candle late", f: v => v.stress.late1.expR > 0 },
+    { id: "C7", text: "Still profitable on the survivorship-controlled 19-coin universe", f: v => v.broad.expR > 0 },
+    { id: "C8", text: "Positive in at least 2 of 3 market regimes (bull, bear, sideways)", f: v => ["bull", "bear", "sideways"].filter(k => v.regimes[k] && v.regimes[k].expR > 0).length >= 2 },
+    { id: "C9", text: "Out-of-sample max drawdown at 0.5% risk ≤ 30% (the kill switch)", f: v => v.oos.maxDDPct <= 30 },
+    { id: "C10", text: "Out-of-sample Sharpe ratio ≥ 0.5", f: v => v.oos.sharpe != null && v.oos.sharpe >= 0.5 }
+  ];
+  function judge(v) {
+    const rows = CRITERIA.map(c => { let ok = false; try { ok = !!c.f(v); } catch (e) { ok = false; } return { id: c.id, text: c.text, pass: ok }; });
+    return { pass: rows.every(r => r.pass), rows };
+  }
+  /* real money stays locked until BOTH the backtest passes AND a forward paper test agrees */
+  const FORWARD = { minTrades: 30, minExpR: 0, minPF: 1.0 };
+  function gate(backtestPass, fwd) {
+    const why = [];
+    if (!backtestPass) why.push("the historical validation did not pass every criterion");
+    if (!fwd || fwd.n < FORWARD.minTrades) why.push("forward paper test has " + (fwd ? fwd.n : 0) + " closed trades; needs " + FORWARD.minTrades);
+    else { if (!(fwd.expR > FORWARD.minExpR)) why.push("forward paper expectancy is not above 0 R"); if (!(fwd.pf >= FORWARD.minPF)) why.push("forward paper profit factor is below 1.0"); }
+    return { eligible: !why.length, why };
+  }
+
+  return { HOUR, DAY, DEFAULTS, cleanBars, feedHealth, resample, atr, signals, regimeFn, simulate, metrics, round, maxDD, dailyReturns, rng, CRITERIA, judge, FORWARD, gate };
+});
+
+</script>
 </head>
 <body>
 <header class="hdr">
@@ -979,7 +1334,7 @@ async function fetchAccount(){const ex=cfg.ex,m=$("acct-msg");if(m){m.className=
 async function downloadHistory(days,res){const ex=cfg.ex,map=exMap(ex),syms=Object.keys(inst),end=utMs(ut(Date.now()).day,0),start=end-days*864e5,out={bars:{}},m=$("dl-msg");let done=0,fail=[];
   if(ex==="delta"){try{await DLT.loadProducts();}catch(e){m.className="msg dn";m.textContent=friendly(e);return null;}}
   await pool(syms,3,async b=>{const s=inst[b].exSym;const rows=[];
-    try{if(ex==="binance"){let st=start;for(let g=0;g<60&&st<end;g++){const r=await getJSON(cfg.binRest+"/api/v3/klines?symbol="+s+"&interval="+res+"m&startTime="+st+"&endTime="+(end-1)+"&limit=1000");
+    try{if(ex==="binance"){let st=start;for(let g=0;g<60&&st<end;g++){const r=await getJSON((cfg.useFut?cfg.binFut+"/fapi/v1/klines":cfg.binRest+"/api/v3/klines")+"?symbol="+s+"&interval="+res+"m&startTime="+st+"&endTime="+(end-1)+"&limit=1000");
           r.forEach(k=>rows.push([+k[0],+k[1],+k[2],+k[3],+k[4],+k[5]]));if(r.length<1000)break;st=+r[r.length-1][0]+res*60000;}}
       else{const cv=ctVal(b),step=2000*res*60000;for(let st=start;st<end;st+=step){const r=await DLT.candles(s,res+"m",st,Math.min(end-1,st+step));r.forEach(k=>rows.push([k.t,k.o,k.h,k.l,k.c,k.v*cv]));}}
       if(rows.length)out.bars[b]=rows;else fail.push(b);}catch(e){fail.push(b);}
@@ -1275,7 +1630,7 @@ function decideScan(key,day,end,T,decT){const q=inst[key],B=bars[key],sg=cfg.sig
   const base=B.base||1,tf=Math.max(base,+sg.scanTf||1);if(end%tf!==0)return; /* v6: optional 5/15-minute signal bars; exits still run every bar */
   const vw=cumVwap(key,L,n),FL=tf>base?aggBars(L,tf):L;if(tf>base&&(!FL.length||FL[FL.length-1].m+tf!==end))return;
   const f=scanFeat(FL,FL.length,{look:sg.scanLook,atrN:sg.atrN,ema:sg.fadeEma,vwap:vw});if(!f)return;
-  const S=scanScore(f,{book:bookImb(q),fund:fundTilt(q)},sg);if(S.score==null)return;const dir=S.score>=+sg.scanMin?1:S.score<=-sg.scanMin?-1:0;if(!dir)return;
+  const S=scanScore(f,{book:bookImb(q),fund:fundTilt(q)},sg);if(S.score==null)return;mobWhyNote(key,S.score,end); /* mobile */const dir=S.score>=+sg.scanMin?1:S.score<=-sg.scanMin?-1:0;if(!dir)return;
   if(key==="BTC"&&!sg.scanBtc)return;
   const mood=scanMood(false),entry=b.c,R=scanStopDist(entry,f.atr,sg),stop=entry-dir*R,lag=Math.max(0,(decT-T)/1000);
   const used=S.used.map(k=>SCAN_LBL[k]).join(", ");
@@ -2267,7 +2622,229 @@ function resultHtml(b){const F=(x=>usdS(x));const head='<thead><tr><th>Segment</
     '<details class="note"><summary>Metric definitions</summary>Trades: closed trades. Win: share with net P&amp;L &gt; 0 after costs. Expect. R: mean of net P&amp;L ÷ risk to the stop. Expect. $: mean net P&amp;L. PF: gross winning $ ÷ gross losing $ (∞ when there are no losing trades, — when there are no trades). Max DD (closed): worst fall of cumulative net P&amp;L from its peak, in exit order. Max drawdown, marked to market: the same on equity marked at every bar end with all open positions, net of estimated costs. Exposure: average capital in open positions over evaluated session time. Return: gross or net P&amp;L ÷ capital. A completed run shows the software ran as described; it is not evidence that the strategy is profitable.</details>'+
     '<button class="btn" id="bt-csv" type="button" style="margin-top:6px"'+(btAll&&btAll.length?'':' disabled title="Run a backtest in this session to export every trade"')+'>Export all trades (CSV)</button>'+
     '<div class="sec-t" style="margin-top:8px"><span>Last trades</span><span>'+b.trades.length+'</span></div><div style="max-height:220px;overflow:auto"><table class="t"><thead><tr><th>Day</th><th>Coin</th><th>Side</th><th>Fill</th><th>Entry</th><th>Exit</th><th>Why</th><th>Net $</th><th>R</th></tr></thead><tbody>'+b.trades.slice(-60).reverse().map(t=>'<tr><td>'+esc(t.day)+'</td><td>'+esc(t.sym)+'</td><td>'+(t.dir>0?"L":"S")+'</td><td title="signal bar end '+(t.sigT?tstr(t.sigT):"—")+'">'+(t.fillT?tstr(t.fillT):hhmm(t.em))+'</td><td>'+fmt(t.entry)+'</td><td>'+fmt(t.exit)+'</td><td>'+esc(t.why)+'</td><td class="'+cl(t.net)+'">'+sgn(t.net,2)+'</td><td class="'+cl(t.r)+'">'+sgn(t.r,2)+'</td></tr>').join("")+'</tbody></table></div>';}
-function renderValidation(){const el=$("v-val");const b=btRes;const F=(x=>usdS(x));const m=(x)=>x&&x.n?'<td>'+x.n+'</td><td>'+fmt(x.win,1)+'%</td><td class="'+cl(x.expR)+'">'+sgn(x.expR,3)+'</td><td class="'+cl(x.exp)+'">'+usdS(x.exp,2)+'</td><td>'+(x.pf!=null?fmt(x.pf,2):x.pfNoLoss?"∞ (no losses)":"—")+'</td><td class="dn">'+usd(-x.dd)+'</td><td>'+(x.avgW==null?"—":sgn(x.avgW,2))+' / '+(x.avgL==null?"—":sgn(x.avgL,2))+'</td><td class="'+cl(x.net)+'">'+usdS(x.net)+'</td>':'<td colspan="8" class="mu">no trades</td>';
+/* ---- mobile: strategy validation for the 4h trend breakout (engine: CXVAL from validation/cxval.js) ----
+   Shows the full-history verdict built into this version, runs the same engine on recent live candles, and keeps a
+   forward paper test. Real money stays locked: the phone build is paper-only, and the gate below is informational. */
+const SVR = {"verdict":{"pass":true,"rows":[{"id":"C1","text":"Out-of-sample trades ≥ 100","pass":true},{"id":"C2","text":"Out-of-sample net expectancy > 0 R after fees, GST, slippage and funding","pass":true},{"id":"C3","text":"Out-of-sample profit factor ≥ 1.15","pass":true},{"id":"C4","text":"Bootstrap 95% lower bound of out-of-sample expectancy > 0 R (not luck)","pass":true},{"id":"C5","text":"Still profitable with fees and slippage doubled","pass":true},{"id":"C6","text":"Still profitable when entries are one 4h candle late","pass":true},{"id":"C7","text":"Still profitable on the survivorship-controlled 19-coin universe","pass":true},{"id":"C8","text":"Positive in at least 2 of 3 market regimes (bull, bear, sideways)","pass":true},{"id":"C9","text":"Out-of-sample max drawdown at 0.5% risk ≤ 30% (the kill switch)","pass":true},{"id":"C10","text":"Out-of-sample Sharpe ratio ≥ 0.5","pass":true}]},"is":{"n":87,"winPct":32.1839,"expR":0.218,"avgNetPct":0.6506,"avgGrossPct":0.7655,"net":85.2039,"fees":14.372,"funding":0.4365,"pf":1.2756,"avgWinR":2.7698,"avgLossR":-0.993,"sdR":2.3157,"tStat":0.8781,"loseStreak":16,"maxDDR":-34.6032,"sumR":18.9665,"sumRwithoutTop10":-39.7186,"expR_lo95":-0.2396,"expR_hi95":0.7444,"mcDDR_p95":-22.1815,"monthsPositive":4,"months":8,"sharpe":0.7271,"sortino":1.2336,"maxDDPct":17.6837,"retPct":8.5204,"cagrPct":11.5542},"oos":{"n":711,"winPct":31.083,"expR":0.1925,"avgNetPct":0.9322,"avgGrossPct":1.2112,"net":761.0501,"fees":132.0632,"funding":107.3608,"pf":1.2505,"avgWinR":2.7203,"avgLossR":-0.9476,"sdR":2.2237,"tStat":2.3079,"loseStreak":20,"maxDDR":-33.5924,"sumR":136.8482,"sumRwithoutTop10":34.4943,"expR_lo95":0.0285,"expR_hi95":0.3588,"mcDDR_p95":-47.9796,"monthsPositive":31,"months":62,"sharpe":0.8275,"sortino":1.4134,"maxDDPct":17.6713,"retPct":82.0194,"cagrPct":10.8843},"oosA":{"n":663,"winPct":31.0709,"expR":0.1781,"avgNetPct":0.9535,"avgGrossPct":1.2407,"net":673.1949,"fees":122.6783,"funding":104.1528,"pf":1.2352,"avgWinR":2.669,"avgLossR":-0.9448,"sdR":2.1763,"tStat":2.1068,"loseStreak":20,"maxDDR":-33.5924,"sumR":118.0578,"sumRwithoutTop10":22.1546,"expR_lo95":0.0267,"expR_hi95":0.3516,"mcDDR_p95":-48.2506,"monthsPositive":29,"months":58,"sharpe":0.7721,"sortino":1.2994,"maxDDPct":17.6713,"retPct":67.3195,"cagrPct":11.1258},"oosB":{"n":48,"winPct":31.25,"expR":0.3915,"avgNetPct":0.638,"avgGrossPct":0.8037,"net":87.8552,"fees":9.3848,"funding":3.208,"pf":1.4991,"avgWinR":3.4249,"avgLossR":-0.9874,"sdR":2.8192,"tStat":0.962,"loseStreak":14,"maxDDR":-14.5553,"sumR":18.7905,"sumRwithoutTop10":-28.2762,"expR_lo95":-0.2937,"expR_hi95":1.2609,"mcDDR_p95":-15.8625,"monthsPositive":2,"months":4,"sharpe":1.7186,"sortino":3.656,"maxDDPct":8.9551,"retPct":8.7855,"cagrPct":28.6622},"stress":{"costs2x":{"what":"fees and slippage doubled","n":711,"winPct":30.2391,"expR":0.1383,"avgNetPct":0.7118,"avgGrossPct":1.1096,"net":478.9197,"fees":239.2014,"funding":101.1369,"pf":1.1634,"avgWinR":2.7078,"avgLossR":-0.9755,"sdR":2.1935,"tStat":1.6808,"loseStreak":20,"maxDDR":-36.9422,"sumR":98.3108,"sumRwithoutTop10":-1.8431,"expR_lo95":-0.0235,"expR_hi95":0.3026,"mcDDR_p95":-56.0637,"monthsPositive":31,"months":62,"sharpe":0.5941,"sortino":0.995,"maxDDPct":19.6277,"maxDDAt":1686078000000,"retPct":50.7164,"cagrPct":7.3328},"slip15":{"what":"slippage 15 bps per fill (3x)","n":711,"winPct":30.3797,"expR":0.1407,"avgNetPct":0.7292,"avgGrossPct":1.008,"net":493.7475,"fees":118.3783,"funding":100.3629,"pf":1.1706,"avgWinR":2.6671,"avgLossR":-0.9618,"sdR":2.1662,"tStat":1.7315,"loseStreak":20,"maxDDR":-36.254,"sumR":100.0121,"sumRwithoutTop10":1.2543,"expR_lo95":-0.0191,"expR_hi95":0.3033,"mcDDR_p95":-54.4223,"monthsPositive":31,"months":62,"sharpe":0.6128,"sortino":1.0272,"maxDDPct":19.2214,"maxDDAt":1686078000000,"retPct":52.2931,"cagrPct":7.5257},"funding2x":{"what":"funding doubled","n":711,"winPct":30.9423,"expR":0.1676,"avgNetPct":0.7721,"avgGrossPct":1.2112,"net":625.2534,"fees":124.6921,"funding":206.1884,"pf":1.2148,"avgWinR":2.6807,"avgLossR":-0.9584,"sdR":2.204,"tStat":2.0283,"loseStreak":16,"maxDDR":-35.1718,"sumR":119.1987,"sumRwithoutTop10":17.2198,"expR_lo95":0.0046,"expR_hi95":0.3337,"mcDDR_p95":-51.0104,"monthsPositive":31,"months":62,"sharpe":0.7202,"sortino":1.22,"maxDDPct":18.236,"maxDDAt":1672862400000,"retPct":67.102,"cagrPct":9.2607},"late1":{"what":"every entry one 4h candle late","n":719,"winPct":30.0417,"expR":0.1648,"avgNetPct":0.7853,"avgGrossPct":1.058,"net":595.9782,"fees":153.1388,"funding":109.629,"pf":1.1949,"avgWinR":2.7724,"avgLossR":-0.955,"sdR":2.4981,"tStat":1.7689,"loseStreak":15,"maxDDR":-48.5014,"sumR":118.4862,"sumRwithoutTop10":-16.8161,"expR_lo95":-0.0053,"expR_hi95":0.3573,"mcDDR_p95":-60.1992,"monthsPositive":30,"months":62,"sharpe":0.6911,"sortino":1.1626,"maxDDPct":24.1935,"maxDDAt":1686078000000,"retPct":65.4515,"cagrPct":9.0738},"longOnly":{"what":"long trades only","n":437,"winPct":30.2059,"expR":0.3072,"avgNetPct":1.8004,"avgGrossPct":2.2138,"net":761.488,"fees":77.53,"funding":126.0674,"pf":1.4109,"avgWinR":3.2374,"avgLossR":-0.9609,"sdR":2.5272,"tStat":2.5413,"loseStreak":14,"maxDDR":-33.0654,"sumR":134.2534,"sumRwithoutTop10":29.1051,"expR_lo95":0.0769,"expR_hi95":0.552,"mcDDR_p95":-37.6301,"monthsPositive":24,"months":62,"sharpe":0.9821,"sortino":1.7176,"maxDDPct":17.1895,"maxDDAt":1672862400000,"retPct":81.7618,"cagrPct":10.8572},"risk1pct":{"what":"1% risk per trade instead of 0.5%","n":711,"winPct":31.083,"expR":0.1925,"avgNetPct":0.9322,"avgGrossPct":1.2112,"net":1600.1171,"fees":325.8473,"funding":252.5354,"pf":1.213,"avgWinR":2.7203,"avgLossR":-0.9476,"sdR":2.2237,"tStat":2.3079,"loseStreak":20,"maxDDR":-33.5924,"sumR":136.8482,"sumRwithoutTop10":34.4943,"expR_lo95":0.0285,"expR_hi95":0.3588,"mcDDR_p95":-47.9796,"monthsPositive":31,"months":62,"sharpe":0.8141,"sortino":1.3894,"maxDDPct":32.1175,"maxDDAt":1672862400000,"retPct":183.4334,"cagrPct":19.6871},"noBestCoin":{"what":"without the best coin (SOL)","n":680,"winPct":30.5882,"expR":0.1487,"avgNetPct":0.625,"avgGrossPct":0.874,"net":518.6792,"fees":122.826,"funding":94.2565,"pf":1.187,"avgWinR":2.6435,"avgLossR":-0.9507,"sdR":2.1427,"tStat":1.8095,"loseStreak":18,"maxDDR":-34.0582,"sumR":101.1042,"sumRwithoutTop10":7.4513,"expR_lo95":-0.0008,"expR_hi95":0.3112,"mcDDR_p95":-51.2499,"monthsPositive":32,"months":62,"sharpe":0.6398,"sortino":1.0807,"maxDDPct":17.9635,"maxDDAt":1672862400000,"retPct":54.9036,"cagrPct":7.8414}},"broad":{"n":891,"winPct":28.2828,"expR":0.0286,"avgNetPct":-0.5443,"avgGrossPct":-0.2879,"net":50.9486,"fees":116.1917,"funding":89.8692,"pf":1.0171,"avgWinR":2.5104,"avgLossR":-0.9501,"sdR":2.085,"tStat":0.4096,"loseStreak":29,"maxDDR":-54.0262,"sumR":25.4928,"sumRwithoutTop10":-81.6446,"expR_lo95":-0.103,"expR_hi95":0.1682,"mcDDR_p95":-87.0879,"monthsPositive":27,"months":62,"sharpe":0.1403,"sortino":0.2231,"maxDDPct":26.0343,"retPct":5.1278,"cagrPct":0.8663},"regimes":{"bull":{"n":362,"winPct":31.4917,"expR":0.1745,"avgNetPct":0.5717,"avgGrossPct":0.7555,"net":398.2483,"fees":76.4421,"funding":36.5226,"pf":1.2376,"avgWinR":2.6667,"avgLossR":-0.9711,"sdR":2.2322,"tStat":1.4877,"loseStreak":22,"maxDDR":-49.5342,"sumR":63.1846,"sumRwithoutTop10":-26.1315,"expR_lo95":-0.0436,"expR_hi95":0.4015,"mcDDR_p95":-40.5642,"monthsPositive":17,"months":37},"bear":{"n":230,"winPct":30.8696,"expR":0.304,"avgNetPct":0.8264,"avgGrossPct":1.0268,"net":356.9798,"fees":40.4388,"funding":19.6862,"pf":1.4026,"avgWinR":3.1431,"avgLossR":-0.9638,"sdR":2.4788,"tStat":1.8599,"loseStreak":16,"maxDDR":-35.6682,"sumR":69.9188,"sumRwithoutTop10":-14.477,"expR_lo95":0.0011,"expR_hi95":0.6367,"mcDDR_p95":-30.8585,"monthsPositive":11,"months":23},"sideways":{"n":140,"winPct":31.4286,"expR":-0.058,"avgNetPct":-0.3325,"avgGrossPct":-0.1347,"net":-67.266,"fees":23.9419,"funding":10.2736,"pf":0.8818,"avgWinR":1.8533,"avgLossR":-0.9341,"sdR":1.6744,"tStat":-0.41,"loseStreak":12,"maxDDR":-29.4185,"sumR":-8.1227,"sumRwithoutTop10":-54.4044,"expR_lo95":-0.316,"expR_hi95":0.2336,"mcDDR_p95":-34.5008,"monthsPositive":8,"months":23}},"years":{"2020":{"n":8,"winPct":50,"expR":2.204,"avgNetPct":10.963,"avgGrossPct":11.707,"net":89.686,"fees":0.931,"funding":5.372,"pf":8.741,"avgWinR":4.989,"avgLossR":-0.581,"sdR":3.582,"tStat":1.741,"loseStreak":2,"maxDDR":-1.294,"sumR":17.634,"sumRwithoutTop10":0,"expR_lo95":0.226,"expR_hi95":4.759,"mcDDR_p95":-2.322,"monthsPositive":1,"months":1},"2021":{"n":145,"winPct":26.897,"expR":0.056,"avgNetPct":1.305,"avgGrossPct":1.89,"net":30.938,"fees":14.86,"funding":47.738,"pf":1.054,"avgWinR":2.731,"avgLossR":-0.928,"sdR":1.896,"tStat":0.357,"loseStreak":20,"maxDDR":-27.8,"sumR":8.154,"sumRwithoutTop10":-43.648,"expR_lo95":-0.247,"expR_hi95":0.39,"mcDDR_p95":-31.655,"monthsPositive":6,"months":12},"2022":{"n":127,"winPct":34.646,"expR":0.105,"avgNetPct":0.151,"avgGrossPct":0.39,"net":62.768,"fees":19.329,"funding":12.231,"pf":1.132,"avgWinR":2.045,"avgLossR":-0.923,"sdR":1.833,"tStat":0.646,"loseStreak":14,"maxDDR":-32.772,"sumR":13.343,"sumRwithoutTop10":-36.458,"expR_lo95":-0.209,"expR_hi95":0.4,"mcDDR_p95":-23.83,"monthsPositive":6,"months":12},"2023":{"n":142,"winPct":31.69,"expR":0.269,"avgNetPct":1.095,"avgGrossPct":1.258,"net":219.375,"fees":31.677,"funding":11.121,"pf":1.35,"avgWinR":2.999,"avgLossR":-0.998,"sdR":2.454,"tStat":1.304,"loseStreak":12,"maxDDR":-20.176,"sumR":38.141,"sumRwithoutTop10":-35.257,"expR_lo95":-0.132,"expR_hi95":0.668,"mcDDR_p95":-25.576,"monthsPositive":6,"months":12},"2024":{"n":133,"winPct":28.571,"expR":0.142,"avgNetPct":0.789,"avgGrossPct":1.019,"net":116.636,"fees":28.375,"funding":22.079,"pf":1.184,"avgWinR":2.803,"avgLossR":-0.923,"sdR":2.206,"tStat":0.741,"loseStreak":15,"maxDDR":-21.549,"sumR":18.85,"sumRwithoutTop10":-43.41,"expR_lo95":-0.225,"expR_hi95":0.534,"mcDDR_p95":-29.026,"monthsPositive":5,"months":12},"2025":{"n":133,"winPct":35.338,"expR":0.204,"avgNetPct":0.791,"avgGrossPct":0.924,"net":178.862,"fees":31.111,"funding":5.585,"pf":1.289,"avgWinR":2.357,"avgLossR":-0.972,"sdR":2.206,"tStat":1.068,"loseStreak":10,"maxDDR":-14.816,"sumR":27.166,"sumRwithoutTop10":-37.204,"expR_lo95":-0.156,"expR_hi95":0.568,"mcDDR_p95":-26.26,"monthsPositive":7,"months":12},"2026":{"n":110,"winPct":29.091,"expR":0.296,"avgNetPct":0.526,"avgGrossPct":0.668,"net":147.988,"fees":20.152,"funding":3.673,"pf":1.358,"avgWinR":3.439,"avgLossR":-0.994,"sdR":2.656,"tStat":1.167,"loseStreak":16,"maxDDR":-35.668,"sumR":32.526,"sumRwithoutTop10":-42.21,"expR_lo95":-0.191,"expR_hi95":0.877,"mcDDR_p95":-23.446,"monthsPositive":4,"months":9}},"fine":{"range":"2025-11-10 → 2026-09-30","oneMinute":{"n":121,"winPct":27.2727,"expR":0.0898,"avgNetPct":-0.1106,"avgGrossPct":0.0229,"net":36.5689,"fees":20.3886,"funding":2.6828,"pf":1.0831,"avgWinR":2.9816,"avgLossR":-0.9946,"sdR":2.3901,"tStat":0.4135,"loseStreak":16,"maxDDR":-34.6032,"sumR":10.8704,"sumRwithoutTop10":-58.586,"expR_lo95":-0.2958,"expR_hi95":0.5339,"mcDDR_p95":-32.1683,"monthsPositive":5,"months":11,"sharpe":0.3176,"sortino":0.5413,"maxDDPct":18.9676,"maxDDAt":1778868180000,"retPct":3.6569,"cagrPct":3.6569},"oneHour":{"n":121,"winPct":27.2727,"expR":0.0898,"avgNetPct":-0.1106,"avgGrossPct":0.0229,"net":36.5689,"fees":20.3886,"funding":2.6828,"pf":1.0831,"avgWinR":2.9816,"avgLossR":-0.9946,"sdR":2.3901,"tStat":0.4135,"loseStreak":16,"maxDDR":-34.6032,"sumR":10.8704,"sumRwithoutTop10":-58.586,"expR_lo95":-0.2971,"expR_hi95":0.552,"mcDDR_p95":-31.6929,"monthsPositive":5,"months":11,"sharpe":0.3176,"sortino":0.5413,"maxDDPct":17.6837,"maxDDAt":1778893200000,"retPct":3.6569,"cagrPct":3.6573}},"parity":{"research":{"n":963,"avgNetPct":0.766,"pf":1.2},"engine":{"n":963,"avgNetPct":0.767,"pf":1.17}},"params":{"tfMs":14400000,"N":55,"atrN":14,"kStop":2,"kTrail":5,"maxHoldMs":2592000000,"market":"perp","feeBps":5,"gstPct":18,"slipBps":5,"delistSlipPct":2,"capital":1000,"riskPct":0.5,"maxOpen":3,"maxLev":2,"killPct":30},"periods":{"IS":"2025-10-01 → 2026-05-31","OOS_A":"2020-12-15 → 2025-09-30","OOS_B":"2026-06-01 → 2026-09-30"},"inputFiles":2864,"inputSha256":"7e62dc9c0dbfa0dd1d384914bd62b9210cdc57bdd315acac52117a22c810225c","engineSha256":"1e7faaad72a2bdd8e3245675a52a5f09374fe536222d279b25d228d05df4e04f","universe":{"core":["BTC","ETH","SOL","XRP","ADA","DOGE"],"broad":["BTC","ETH","XRP","LTC","LINK","BCH","ADA","DOT","BNB","XLM","EOS","XMR","TRX","XTZ","NEO","ATOM","UNI","DOGE","SOL"],"delisted":["EOS"]}}; /* full-history validation result embedded at build time (null if it has not been run) */
+const SV_COINS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE"];
+const SV_H = 3600e3, SV_TF = 4 * SV_H;
+let SV = { busy: false, msg: "", live: store.get("svLive", null) }, SVF = store.get("svFwd", null);
+const svE = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const svN = (x, d) => x == null || !isFinite(x) ? "—" : (+x).toFixed(d == null ? 2 : d);
+const svS = (x, d) => x == null || !isFinite(x) ? "—" : (x > 0 ? "+" : "") + (+x).toFixed(d == null ? 2 : d);
+const svC = x => x == null ? "" : x > 0 ? "up" : x < 0 ? "dn" : "";
+const svT = t => new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+/* which market the current price source really is: never mix spot prices with futures costs */
+function svMarket() {
+  if (cfg.ex === "delta") return { market: "perp", venue: "Delta Exchange India perpetuals", feeBps: +cfg.cost.perpBps, funding: "assumed" };
+  if (cfg.useFut) return { market: "perp", venue: "Binance USDⓈ-M perpetuals", feeBps: +cfg.cost.perpBps, funding: "real" };
+  return { market: "spot", venue: "Binance spot (the futures API is not reachable from this network)", feeBps: +cfg.cost.spotBps, funding: "none" };
+}
+async function svGet(url) { /* 15 s timeout, 2 retries with back-off; a failure is reported, never hidden */
+  let last;
+  for (let i = 0; i < 3; i++) {
+    const c = new AbortController(), t = setTimeout(() => c.abort(), 15000);
+    try { return await getJSON(url, { signal: c.signal, cache: "no-store" }); }
+    catch (e) { last = e; await new Promise(r => setTimeout(r, 800 * (i + 1))); }
+    finally { clearTimeout(t); }
+  }
+  throw last;
+}
+async function svCandles(b, mk, start, end) {
+  const s = inst[b].exSym, rows = [];
+  if (cfg.ex === "delta") {
+    for (let st = start; st < end; st += 1500 * SV_H) {
+      const j = await svGet(cfg.deltaRest + "/v2/history/candles?resolution=1h&symbol=" + encodeURIComponent(s) + "&start=" + Math.floor(st / 1000) + "&end=" + (Math.floor(Math.min(end, st + 1500 * SV_H) / 1000) - 1)); /* pages do not overlap */
+      const pg = (j.result || []).map(k => ({ t: k.time * 1000, o: +k.open, h: +k.high, l: +k.low, c: +k.close, v: +k.volume || 0 }));
+      if (pg.length > 1 && pg[0].t > pg[pg.length - 1].t) pg.reverse(); /* Delta sends newest first; anything still out of order is counted */
+      pg.forEach(k => rows.push(k));
+    }
+  } else {
+    const base = mk.market === "perp" ? cfg.binFut + "/fapi/v1/klines" : cfg.binRest + "/api/v3/klines";
+    for (let st = start, g = 0; st < end && g < 20; g++) {
+      const r = await svGet(base + "?symbol=" + s + "&interval=1h&startTime=" + st + "&endTime=" + (end - 1) + "&limit=1000");
+      r.forEach(k => rows.push({ t: +k[0], o: +k[1], h: +k[2], l: +k[3], c: +k[4], v: +k[5] }));
+      if (r.length < 1000) break; st = +r[r.length - 1][0] + SV_H;
+    }
+  }
+  return rows;
+}
+async function svFunding(b, mk, start, end) {
+  if (mk.market !== "perp") return { list: [], src: "none (spot)" };
+  if (mk.funding === "real") {
+    const out = [];
+    for (let st = start, g = 0; st < end && g < 10; g++) {
+      const r = await svGet(cfg.binFut + "/fapi/v1/fundingRate?symbol=" + inst[b].exSym + "&startTime=" + st + "&endTime=" + end + "&limit=1000");
+      r.forEach(x => out.push({ t: Math.round(+x.fundingTime / SV_H) * SV_H, rate: +x.fundingRate }));
+      if (r.length < 1000) break; st = +r[r.length - 1].fundingTime + 1;
+    }
+    return { list: out, src: "Binance funding history" };
+  }
+  const out = [], r = (+cfg.cost.fundBps || 0) / 1e4; /* Delta: no public funding history; constant rate from Settings, longs pay */
+  for (let t = Math.ceil(start / (8 * SV_H)) * 8 * SV_H; t < end; t += 8 * SV_H) out.push({ t, rate: r });
+  return { list: out, src: "assumed " + (+cfg.cost.fundBps || 0) + " bps per 8 h (Settings), not real Delta history" };
+}
+async function svRunLive(days) {
+  if (SV.busy) return;
+  if (mode !== "live") { SV.msg = "Switch to Live market prices first."; renderValidation(); return; }
+  SV.busy = true; SV.msg = "Downloading candles…"; renderValidation();
+  const mk = svMarket(), now = Date.now(), end = Math.floor(now / SV_H) * SV_H, start = end - (days || 180) * 864e5;
+  const coins = {}, quality = {}, failed = [];
+  let fsrc = "";
+  try {
+    if (cfg.ex === "delta") { try { await DLT.loadProducts(); } catch (e) {} }
+    const list = SV_COINS.filter(b => inst[b]);
+    await pool(list, 2, async b => {
+      try {
+        const raw = await svCandles(b, mk, start, end);
+        const cl = CXVAL.cleanBars(raw, SV_H, { nowMs: now });
+        const closed = cl.bars.filter(x => x.t + SV_H <= now); /* the candle still forming is never used */
+        const health = CXVAL.feedHealth(cl.rep, SV_H, now, 3 * SV_H);
+        quality[b] = { rep: cl.rep, dropOpen: cl.bars.length - closed.length, health };
+        if (!health.ok || closed.length < 24 * 20) { failed.push(b + " (" + (health.why.join("; ") || "too little history") + ")"); return; }
+        const f = await svFunding(b, mk, start, end); fsrc = f.src;
+        coins[b] = { exec: closed, funding: f.list };
+      } catch (e) { failed.push(b + " (" + friendly(e) + ")"); }
+      SV.msg = "Downloaded " + (Object.keys(coins).length + failed.length) + "/" + list.length + "…"; renderValidation();
+    });
+    if (!coins.BTC || Object.keys(coins).length < Math.ceil(SV_COINS.length / 2)) throw new Error("not enough healthy data to run (" + Object.keys(coins).length + " coins ok; failed: " + failed.join(", ") + ")");
+    const P = { market: mk.market, feeBps: mk.feeBps, spotFeeBps: mk.feeBps, gstPct: +cfg.cost.gst || 0, slipBps: +cfg.cost.slipBps || 0,
+      capital: +cfg.risk.capital || 1000, riskPct: 0.5, maxOpen: 3, maxLev: 2, killPct: 30 };
+    const r = CXVAL.simulate({ market: mk.market, coins }, P);
+    const closedT = r.trades.filter(t => t.why !== "end of data"), openT = r.trades.filter(t => t.why === "end of data");
+    const m = CXVAL.metrics(closedT, r.curve, { boot: 1000, mc: 300 });
+    let fwd = null;
+    if (SVF && SVF.start) {
+      const ft = r.trades.filter(t => t.sigT + SV_TF >= SVF.start), fc = ft.filter(t => t.why !== "end of data");
+      const snap = SVF.snap || {};
+      let same = 0, changed = 0;
+      fc.forEach(t => { const k = t.sym + "|" + t.tin, v = t.why + "|" + t.exit.toPrecision(8); if (snap[k] == null) snap[k] = v; else if (snap[k] === v) same++; else changed++; });
+      SVF.snap = snap; store.set("svFwd", SVF);
+      fwd = Object.assign(CXVAL.round(CXVAL.metrics(fc, null, { boot: 500, mc: 100 }), 4), { open: ft.length - fc.length, same, changed,
+        trades: ft.slice(-30).map(t => ({ sym: t.sym, d: t.d, tin: t.tin, tout: t.tout, entry: t.entry, exit: t.exit, why: t.why, R: t.R, net: t.net })) });
+    }
+    SV.live = { at: now, venue: mk.venue, market: mk.market, funding: fsrc, days: days || 180, coins: Object.keys(coins), failed, signals: r.signals,
+      quality: Object.fromEntries(Object.entries(quality).map(([k, q]) => [k, { kept: q.rep.kept, gaps: q.rep.gaps, missing: q.rep.missingBars, dup: q.rep.duplicates, bad: q.rep.badOHLC + q.rep.nonPositive, ooo: q.rep.outOfOrder, dropOpen: q.dropOpen, ok: q.health.ok }])),
+      m: CXVAL.round(m, 4), skipped: r.skipped, recon: r.recon.diff, open: openT.map(t => ({ sym: t.sym, d: t.d, tin: t.tin, entry: t.entry, stop: t.stop0, mark: t.exit, R: t.R })),
+      trades: closedT.slice(-60).map(t => ({ sym: t.sym, d: t.d, sigT: t.sigT, tin: t.tin, tout: t.tout, entry: t.entry, exit: t.exit, why: t.why, fees: t.fees, funding: t.funding, net: t.net, R: t.R })),
+      all: closedT.map(t => [t.sym, t.d, t.sigT, t.tin, t.tout, t.entry, t.exit, t.why, t.qty, t.fees, t.funding, t.net, t.R]), fwd };
+    try { store.set("svLive", Object.assign({}, SV.live, { all: null })); } catch (e) {}
+    SV.msg = "Done: " + closedT.length + " closed trades on " + Object.keys(coins).length + " coins" + (failed.length ? "; skipped " + failed.join(", ") : "") + ".";
+  } catch (e) { SV.msg = "Live check failed: " + friendly(e) + ". Nothing was changed."; }
+  finally { SV.busy = false; renderValidation(); }
+}
+function svCsv() {
+  if (!SV.live || !SV.live.all) return;
+  const h = "sym,side,signal_candle_utc,entry_utc,exit_utc,entry,exit,exit_reason,qty,fees,funding,net,R\n";
+  const s = SV.live.all.map(a => [a[0], a[1] > 0 ? "long" : "short", new Date(a[2]).toISOString(), new Date(a[3]).toISOString(), new Date(a[4]).toISOString(), a[5], a[6], a[7], a[8], a[9].toFixed(4), a[10].toFixed(4), a[11].toFixed(4), a[12].toFixed(4)].join(",")).join("\n");
+  const el = document.createElement("a"); el.href = URL.createObjectURL(new Blob([h + s + "\n"], { type: "text/csv" })); el.download = "breakout_live_check_trades.csv"; el.click();
+}
+function svMetricRow(name, m) {
+  if (!m || !m.n) return '<tr><td>' + svE(name) + '</td><td colspan="7" class="mu">no trades</td></tr>';
+  return '<tr><td>' + svE(name) + '</td><td>' + m.n + '</td><td class="' + svC(m.expR) + '">' + svS(m.expR, 3) + '</td><td class="' + svC(m.avgNetPct) + '">' + svS(m.avgNetPct, 2) + '%</td><td>' + svN(m.pf, 2) + '</td><td>' + svN(m.winPct, 0) + '%</td><td class="dn">' + (m.maxDDPct != null ? svN(m.maxDDPct, 1) + "%" : svN(m.maxDDR, 1) + "R") + '</td><td>' + svN(m.sharpe, 2) + '</td></tr>';
+}
+const SV_HEAD = '<thead><tr><th>Test</th><th>Trades</th><th>Net R/trade</th><th>Net %/trade</th><th>PF</th><th>Win</th><th>Max DD</th><th>Sharpe</th></tr></thead>';
+const SV_LIMITS = ["Prices are Binance futures history; Delta India tracks them closely (0.997 correlation) but is not identical, and Delta's own funding history is not public.",
+  "Stops are checked on 1-hour bars in the 6-year test; a 1-minute check on the last year is shown separately.",
+  "Partial fills, exchange outages and order rejections are not modelled. A gap through a stop fills at the worse open price.",
+  "The 19-coin universe is a point-in-time list by market value in Dec 2020, written down from memory of the rankings, not from a downloaded ranking file.",
+  "About 3 in 10 trades win. Profit depends on a few big trends; long losing runs are normal for this strategy.",
+  "A backtest pass is not proof of future profit. Real money also needs a forward paper test that agrees."];
+function svHtml() {
+  const R = SVR, G = CXVAL.gate(!!(R && R.verdict && R.verdict.pass), SVF && SV.live && SV.live.fwd ? SV.live.fwd : null);
+  let h = '<div class="fbox" id="sv-box" style="margin-bottom:10px"><h3>Strategy check · 4h trend breakout</h3>';
+  h += '<div class="mob-note">Real money: <b>LOCKED</b>. This phone app is paper-only. Why: ' + svE(G.why.join("; ")) + '.</div>';
+  if (!R) h += '<div class="am">The full-history validation has not been run for this version.</div>';
+  else {
+    const v = R.verdict, o = R.oos;
+    h += '<div class="' + (v.pass ? "up" : "dn") + '" style="font:700 15px var(--f-num);margin:6px 0">Historical validation: ' + (v.pass ? "PASS" : "FAIL") + ' (' + v.rows.filter(x => x.pass).length + ' of ' + v.rows.length + ' criteria)</div>';
+    const thin = [];
+    if (R.broad && R.broad.expR_lo95 <= 0) thin.push("on the wider 19-coin list it only just breaks even (" + svS(R.broad.expR, 2) + " R, and the 95% range includes losses)");
+    if (R.regimes && R.regimes.sideways && R.regimes.sideways.expR < 0) thin.push("it loses in sideways markets (" + svS(R.regimes.sideways.expR, 2) + " R)");
+    if (R.fine && R.fine.oneMinute && R.fine.oneMinute.expR_lo95 <= 0) thin.push("the most recent year made only " + svS(R.fine.oneMinute.expR, 2) + " R per trade");
+    if (v.pass && thin.length) h += '<div class="am" style="font-size:12px;margin-bottom:6px">Passed, but by a thin margin: ' + svE(thin.join("; ")) + '. Read this as "worth paper-testing", not "proven to make money".</div>';
+    h += '<dl class="kv"><dt>Net expectancy (unseen data)</dt><dd class="' + svC(o.expR) + '">' + svS(o.expR, 3) + ' R per trade · ' + svS(o.avgNetPct, 2) + '% of position · 95% range ' + svS(o.expR_lo95, 2) + ' to ' + svS(o.expR_hi95, 2) + ' R</dd>' +
+      '<dt>Profit factor</dt><dd>' + svN(o.pf, 2) + '</dd><dt>Max drawdown (0.5% risk)</dt><dd class="dn">' + svN(o.maxDDPct, 1) + '% · worst losing run ' + o.loseStreak + ' trades</dd>' +
+      '<dt>Sharpe ratio</dt><dd>' + svN(o.sharpe, 2) + '</dd><dt>Trades</dt><dd>' + o.n + ' unseen (' + svE(R.periods.OOS_A) + ' and ' + svE(R.periods.OOS_B) + ') · ' + R.is.n + ' in-sample</dd>' +
+      '<dt>Without the 10 best trades</dt><dd class="' + svC(o.sumRwithoutTop10) + '">' + svS(o.sumRwithoutTop10, 1) + ' R in total</dd></dl>';
+    h += '<div style="overflow-x:auto"><table class="t"><thead><tr><th></th><th style="text-align:left">Pass rule (written before the run)</th></tr></thead><tbody>' +
+      v.rows.map(x => '<tr><td class="' + (x.pass ? "up" : "dn") + '">' + (x.pass ? "PASS" : "FAIL") + '</td><td style="text-align:left;white-space:normal">' + svE(x.text) + '</td></tr>').join("") + '</tbody></table></div>';
+    h += '<details class="note"><summary>Stress tests, regimes and years</summary><div style="overflow-x:auto"><table class="t">' + SV_HEAD + '<tbody>' +
+      svMetricRow("In-sample", R.is) + svMetricRow("Unseen (all)", R.oos) + svMetricRow("Unseen 2020-25", R.oosA) + svMetricRow("Unseen 2026", R.oosB) +
+      Object.entries(R.stress).map(([k, m]) => svMetricRow(m.what, m)).join("") + svMetricRow("19-coin universe (survivorship check)", R.broad) +
+      Object.entries(R.regimes).map(([k, m]) => svMetricRow("Regime: " + k, m)).join("") +
+      Object.entries(R.years).map(([k, m]) => svMetricRow("Year " + k, m)).join("") + (R.fine ? svMetricRow("Last year, 1-minute fills", R.fine.oneMinute) + svMetricRow("Last year, 1-hour fills", R.fine.oneHour) : "") +
+      '</tbody></table></div></details>';
+    h += '<details class="note"><summary>Limitations</summary><ul style="margin:4px 0 0 16px;padding:0">' + SV_LIMITS.map(x => '<li>' + svE(x) + '</li>').join("") + '</ul></details>';
+    h += '<div class="note">Data: ' + R.inputFiles + ' Binance files, fingerprint ' + svE(String(R.inputSha256).slice(0, 12)) + ' · engine ' + svE(String(R.engineSha256).slice(0, 12)) + ' · costs: fee ' + R.params.feeBps + ' bps + ' + R.params.gstPct + '% GST + ' + R.params.slipBps + ' bps slippage per fill, real funding.</div>';
+  }
+  /* live check */
+  const L = SV.live, mk = svMarket();
+  h += '<h3 style="margin-top:12px">Live data check</h3><div class="note">Downloads recent closed 1-hour candles from <b>' + svE(mk.venue) + '</b>, checks them (gaps, duplicates, bad candles, stale feed), builds 4-hour candles on UTC boundaries, and runs the same engine. ' +
+    (mk.market === "spot" ? '<span class="am">Spot prices: long trades only, spot fees, no funding.</span>' : 'Perpetual futures: long and short, perp fees, funding ' + (mk.funding === "real" ? "from Binance history." : "assumed from Settings (Delta does not publish funding history).")) + '</div>';
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0"><select id="sv-days" aria-label="History"><option value="90">90 days</option><option value="180" selected>180 days</option><option value="365">365 days</option></select>' +
+    '<button class="btn pri" id="sv-run" type="button"' + (SV.busy ? " disabled" : "") + '>' + (SV.busy ? "Running…" : "Run live check") + '</button>' +
+    '<button class="btn" id="sv-csv" type="button"' + (L && L.all ? "" : " disabled") + '>Trade log (CSV)</button></div>';
+  if (SV.msg) h += '<div class="msg">' + svE(SV.msg) + '</div>';
+  if (L) {
+    h += '<dl class="kv"><dt>Run</dt><dd>' + svT(L.at) + ' · ' + svE(L.venue) + ' · ' + L.days + ' days · ' + L.coins.length + ' coins</dd><dt>Funding</dt><dd>' + svE(L.funding || "—") + '</dd>' +
+      '<dt>Accounting check</dt><dd class="' + (Math.abs(L.recon) < 1e-6 ? "up" : "dn") + '">' + (Math.abs(L.recon) < 1e-6 ? "equity change = sum of trade P&L ✓" : "MISMATCH " + svN(L.recon, 6)) + '</dd></dl>';
+    h += '<div style="overflow-x:auto"><table class="t"><thead><tr><th>Coin</th><th>Candles</th><th>Gaps</th><th>Missing h</th><th>Dupes</th><th>Bad</th><th>Out of order</th><th>Feed</th></tr></thead><tbody>' +
+      Object.entries(L.quality).map(([k, q]) => '<tr><td>' + svE(k) + '</td><td>' + q.kept + '</td><td>' + q.gaps + '</td><td>' + q.missing + '</td><td>' + q.dup + '</td><td>' + q.bad + '</td><td>' + q.ooo + '</td><td class="' + (q.ok ? "up" : "dn") + '">' + (q.ok ? "ok" : "stale") + '</td></tr>').join("") + '</tbody></table></div>';
+    if (L.failed && L.failed.length) h += '<div class="am" style="font-size:12px">Not used: ' + svE(L.failed.join("; ")) + '</div>';
+    h += '<div style="overflow-x:auto"><table class="t">' + SV_HEAD + '<tbody>' + svMetricRow("Recent " + L.days + " days", L.m) + '</tbody></table></div>';
+    h += '<div class="note">Recent results are a small sample and are not a pass/fail test. Open positions now: ' + (L.open.length ? L.open.map(o => svE(o.sym) + " " + (o.d > 0 ? "long" : "short") + " since " + svT(o.tin)).join("; ") : "none") + '.</div>';
+    if (L.trades.length) h += '<details class="note"><summary>Last trades (' + L.trades.length + ')</summary><div style="overflow-x:auto;max-height:240px"><table class="t"><thead><tr><th>Coin</th><th>Side</th><th>In (UTC)</th><th>Out</th><th>Entry</th><th>Exit</th><th>Why</th><th>Fees+fund</th><th>R</th></tr></thead><tbody>' +
+      L.trades.slice().reverse().map(t => '<tr><td>' + svE(t.sym) + '</td><td>' + (t.d > 0 ? "L" : "S") + '</td><td>' + svT(t.tin).slice(5, 16) + '</td><td>' + svT(t.tout).slice(5, 16) + '</td><td>' + svN(t.entry, 4) + '</td><td>' + svN(t.exit, 4) + '</td><td>' + svE(t.why) + '</td><td>' + svN(t.fees + t.funding, 2) + '</td><td class="' + svC(t.R) + '">' + svS(t.R, 2) + '</td></tr>').join("") + '</tbody></table></div></details>';
+  }
+  /* forward paper test */
+  h += '<h3 style="margin-top:12px">Forward paper test</h3><div class="note">Counts only signals that happen after you press Start, using the same rules and costs. Real money needs ' + CXVAL.FORWARD.minTrades + ' closed forward trades with a positive result, on top of a historical PASS. Re-run the live check every day or two (it updates on its own while the app is open).</div>';
+  if (!SVF) h += '<button class="btn pri" id="sv-fwd" type="button">Start forward test</button>';
+  else {
+    const F = L && L.fwd;
+    h += '<dl class="kv"><dt>Started</dt><dd>' + svT(SVF.start) + '</dd>' + (F ? '<dt>Closed trades</dt><dd>' + F.n + ' of ' + CXVAL.FORWARD.minTrades + ' needed · open ' + F.open + '</dd><dt>Result</dt><dd class="' + svC(F.expR) + '">' + (F.n ? svS(F.expR, 3) + ' R per trade · PF ' + svN(F.pf, 2) : "—") + '</dd><dt>Log consistency</dt><dd class="' + (F.changed ? "dn" : "up") + '">' + F.same + ' earlier trades unchanged' + (F.changed ? ", " + F.changed + " CHANGED (the exchange revised candles)" : "") + '</dd>' : '<dt>Status</dt><dd>Run the live check to update.</dd>') + '</dl>';
+    h += '<button class="btn" id="sv-fwd-stop" type="button">Reset forward test</button>';
+  }
+  return h + '</div>';
+}
+let svArm = 0;
+function svMount() {
+  const el = $("v-val"); if (!el || typeof CXVAL === "undefined") return;
+  const old = document.getElementById("sv-box"); if (old) old.remove();
+  el.insertAdjacentHTML("afterbegin", svHtml());
+  const b = $("sv-run"); if (b) b.onclick = () => svRunLive(+$("sv-days").value || 180);
+  const c = $("sv-csv"); if (c) c.onclick = svCsv;
+  const f = $("sv-fwd"); if (f) f.onclick = () => { SVF = { start: Date.now(), snap: {} }; store.set("svFwd", SVF); svRunLive(180); };
+  const s = $("sv-fwd-stop"); if (s) s.onclick = () => { if (Date.now() - svArm > 5000) { svArm = Date.now(); s.textContent = "Tap again to reset"; return; } SVF = null; store.set("svFwd", null); if (SV.live) SV.live.fwd = null; renderValidation(); };
+}
+/* while a forward test runs, refresh the live check every 30 minutes the app is open (signals happen at 4h candle closes) */
+setInterval(() => { if (SVF && !SV.busy && !document.hidden && mode === "live" && (!SV.live || Date.now() - SV.live.at > 30 * 60e3)) svRunLive(SV.live ? SV.live.days : 180); }, 60e3);
+
+function renderValidation(){renderValidation0();svMount();}
+
+/* mobile: why the paper bot has or has not traded since Start */
+const MW={n:0,best:{},since:0};
+function mobWhyNote(k,sc,end){if(!AUTO.on)return;MW.n++;const b=MW.best[k];if(!b||Math.abs(sc)>Math.abs(b.s))MW.best[k]={s:sc,end};}
+function mobWhyHtml(){const sg=cfg.sig,th=+sg.scanMin||60,st=AUTO.startedAt||0;
+  if(!AUTO.on&&!st)return '<b>Why no trades yet?</b> Press Start: the bot only looks for trades while it is running and this app is open on screen.';
+  if(MW.since!==st){MW.since=st;MW.n=0;MW.best={};}
+  const sig=sigLog.filter(t=>t.strat==="scan"&&t.decT>=st),trig=sig.filter(t=>t.state!=="NO-TRADE"),blk=sig.filter(t=>t.state==="NO-TRADE");
+  const why={};blk.forEach(t=>String(t.reason).split("; ").forEach(r=>{const k=r.replace(/[\d.,$%×σ+−-]+/g,"#").slice(0,70);why[k]=(why[k]||0)+1;}));
+  const top=Object.entries(MW.best).sort((a,b)=>Math.abs(b[1].s)-Math.abs(a[1].s)).slice(0,3).map(([k,v])=>k+" "+(v.s>0?"+":"")+Math.round(v.s)).join(", ");
+  const nowM=ut(now()).m,fresh=Object.keys(inst).filter(k=>{const B=bars[k];return B&&B.list.length&&nowM-B.list[B.list.length-1].m<=3;}).length;
+  const mood=scanMood(false),mins=Math.round((Date.now()-st)/60000);const out=[];
+  out.push('<b>Since Start ('+mins+' min):</b> '+MW.n+' coin checks, '+sig.length+' reached the ±'+th+' score, '+trig.length+' became paper trades.');
+  out.push('Closest coins: '+(top||"none yet")+' (a trade needs ±'+th+').');
+  if(blk.length)out.push('Blocked by safety filters: '+Object.entries(why).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([k,n])=>esc(k)+' ('+n+')').join('; ')+'.');
+  out.push('1-minute candles arriving: '+fresh+' of '+Object.keys(inst).length+' coins'+(fresh?'':' <span class="dn">(no fresh candles: the bot cannot decide; tap Reconnect)</span>')+'.');
+  out.push('Market mood: '+(mood.bias==null?'<span class="am">unavailable ('+esc((mood.why||[]).join(", "))+')</span>':(mood.long&&mood.short?'longs and shorts allowed':mood.long?'longs only':mood.short?'shorts only':'<span class="am">no new trades (mood neutral)</span>')));
+  if(nowM>(toMin(sg.cutoff)||1200))out.push('<span class="am">After the '+esc(sg.cutoff)+' UTC entry cut-off: no new trades until 00:00 UTC (05:30 IST).</span>');
+  return out.join('<br>');}
+setInterval(()=>{const el=$("v-auto");if(!el||el.hidden||!el.dataset.built)return;let d=$("mob-why");
+  if(!d){d=document.createElement("div");d.id="mob-why";d.className="mob-note";d.style.cssText="border-color:var(--ln2);background:var(--p);color:var(--tx2)";const m=$("au-msg");if(m)m.insertAdjacentElement("afterend",d);else el.prepend(d);}
+  const h=mobWhyHtml();if(d.innerHTML!==h)d.innerHTML=h;},2000);
+
+function renderValidation0(){const el=$("v-val");const b=btRes;const F=(x=>usdS(x));const m=(x)=>x&&x.n?'<td>'+x.n+'</td><td>'+fmt(x.win,1)+'%</td><td class="'+cl(x.expR)+'">'+sgn(x.expR,3)+'</td><td class="'+cl(x.exp)+'">'+usdS(x.exp,2)+'</td><td>'+(x.pf!=null?fmt(x.pf,2):x.pfNoLoss?"∞ (no losses)":"—")+'</td><td class="dn">'+usd(-x.dd)+'</td><td>'+(x.avgW==null?"—":sgn(x.avgW,2))+' / '+(x.avgL==null?"—":sgn(x.avgL,2))+'</td><td class="'+cl(x.net)+'">'+usdS(x.net)+'</td>':'<td colspan="8" class="mu">no trades</td>';
   const head='<thead><tr><th>Segment</th><th>Trades</th><th>Win</th><th>Expect. R</th><th>Expect. $</th><th>PF</th><th>Max DD</th><th>Avg W/L R</th><th>Net $</th></tr></thead>';
   const comp=[["Market regime (stage 1)","Untested as a filter on its own. Rule-based; thresholds in Settings."],["Coin setup criteria (stage 2)","Untested. A count of five yes/no conditions; not calibrated."],
     ["ORB + VWAP entry trigger (stage 3)",b&&b.oos&&b.oos.n?b.status:"Untested: no backtest has been run on loaded history"],["Tone meter","Descriptive only, never used as a signal"],
@@ -2288,7 +2865,7 @@ function renderValidation(){const el=$("v-val");const b=btRes;const F=(x=>usdS(x
    '<h3 style="margin-top:12px">5 · Paper trades vs signals</h3>'+(jl.length?'<table class="t"><thead><tr><th>Signal</th><th>Coin</th><th>Planned R:R</th><th>Realised R</th><th>Exit rationale</th></tr></thead><tbody>'+jl.map(e=>'<tr><td>'+esc(e.signalId)+'</td><td>'+esc(e.sym)+'</td><td>'+fmt(e.plannedRR,2)+'</td><td class="'+cl(e.rMult)+'">'+sgn(e.rMult,2)+'</td><td style="text-align:left">'+esc(e.exitWhy||"")+'</td></tr>').join("")+'</tbody></table><div class="note">Signals triggered this session: '+sigLog.filter(t=>t.state!=="NO-TRADE").length+' · journalled from a signal: '+journal.filter(e=>e.signalId).length+'</div>':'<div class="empty">No closed paper trades linked to signals yet. Use Plan on a triggered signal, then close it with an exit rationale.</div>')+'</div></div>';}
 async function runDownload(){const m=$("dl-msg"),days=+$("dl-days").value||30,res=+$("dl-res").value||5;$("dl-go").disabled=true;m.className="msg";m.textContent="Starting…";
   try{const r=await downloadHistory(days,res);if(!r)return;const n=Object.keys(r.json.bars).length;if(!n)throw new Error("No candles returned (network, region block or CORS).");
-    dataset=parseDataset(JSON.stringify(r.json));dataset.src=(cfg.ex==="delta"?"Delta Exchange":"Binance")+" candles, downloaded "+new Date().toISOString().slice(0,16).replace("T"," ")+" UTC";dataset.raw=r.json;
+    dataset=parseDataset(JSON.stringify(r.json));dataset.src=(cfg.ex==="delta"?"Delta Exchange perpetual":cfg.useFut?"Binance USD-M futures":"Binance SPOT (futures API not reachable, so prices are spot while costs are perp: results approximate)")+" candles, downloaded "+new Date().toISOString().slice(0,16).replace("T"," ")+" UTC";dataset.raw=r.json;
     renderValidation();const m2=$("dl-msg");m2.className="msg up";m2.textContent="Loaded "+dataset.n+" bars for "+n+" coins"+(r.fail.length?" · missing "+r.fail.length:"")+".";}
   catch(e){m.className="msg dn";m.textContent=friendly(e);}finally{const b=$("dl-go");if(b)b.disabled=false;}}
 function saveDataset(){if(!dataset||!dataset.raw)return;const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([JSON.stringify(dataset.raw)],{type:"application/json"}));
@@ -2714,7 +3291,7 @@ function mobWsProbe(u){return new Promise(res=>{let w,done=false;const fin=v=>{i
 const MOB_SRC={dlt:{ex:"delta",name:"Delta Exchange India",rest:"https://api.india.delta.exchange",ws:"wss://socket.india.delta.exchange",probe:"/v2/tickers/BTCUSD",wsProbe:"wss://socket.india.delta.exchange"},
   bin:{ex:"binance",name:"Binance",rest:"https://api.binance.com",ws:"wss://stream.binance.com:9443",probe:"/api/v3/time",wsProbe:"wss://stream.binance.com:9443/ws/btcusdt@bookTicker"},
   binv:{ex:"binance",name:"Binance mirror",rest:"https://data-api.binance.vision",ws:"wss://data-stream.binance.vision",probe:"/api/v3/time",wsProbe:"wss://data-stream.binance.vision/ws/btcusdt@bookTicker"}};
-let mobBusy=false;const MOB_VER="m1.5";
+let mobBusy=false;const MOB_VER="m1.6";
 async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=true;
   const say=t=>{const e=$("mob-src");if(e)e.textContent=t;},diag=[];const showDiag=()=>{const e=$("mob-diag");if(e)e.textContent=diag.join("\n")+"\napp "+MOB_VER;};
   try{say("Finding a live price source…");let pick=null,restOk=false;
@@ -2728,7 +3305,7 @@ async function mobConnect(){if(mobBusy||mode!=="live"||btActive)return;mobBusy=t
     else{cfg.deltaRest=pick.rest;cfg.deltaWs=pick.ws;}
     saveCfg();
     if(exChanged){buildUniverse();buildNet();fillSymSelect();account=null;DLT.products=null;regCache.t=-1;setMode("live");}
-    say("Live prices from "+pick.name+(restOk?"":" (stream only)"));
+    say("Live prices from "+pick.name+(pick.ex==="delta"?" · perpetual futures":" · spot prices")+(restOk?"":" (stream only)"));
     if(pick.ex==="delta"&&restOk){try{const P=await DLT.loadProducts();const miss=Object.keys(inst).filter(b=>!P[inst[b].exSym]);
       if(miss.length&&miss.length<Object.keys(inst).length){cfg.universe=String(cfg.universe).split("\n").filter(l=>!miss.includes(l.split(",")[0].trim().toUpperCase())).join("\n");
         saveCfg();buildUniverse();buildNet();fillSymSelect();regCache.t=-1;sysMsg("Removed coins Delta India does not list: "+miss.join(", "),"sys");}}catch(e){}}
