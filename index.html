@@ -781,7 +781,7 @@ const DEF={ver:1,ex:"binance",auto:30,
     /* v5 360° scanner */ strat:"scan",scanMin:52,scanLook:4,atrN:14,atrK:1.8,lockMult:3.0,lockBuf:0.04,giveBack:35,fadeEma:9,timeStop:30,maxHold:180,cooldown:15,lossCool:2,coolMin:30,
     moodTh:1,moodBrHi:56,moodBrLo:44,volPause:3.8,minQv:1500000,scanWarm:15,scanBtc:1,scanTopN:30,wMom:35,wVol:20,wFlow:10,wBook:5,wBrk:20,wFund:10,
     /* v6 entry safety (profit-tuned for 5m horizon) */ scanTf:5,chaseZ:2.8,edgeMult:1.8,liqSafety:55,mmrPct:0.5,fundWin:10,fundMin:0.00015,maxPerCoinDay:3,
-    /* v7 4h Donchian breakout (CXVAL live engine) */ donN:55,donStopK:2.0,donTrailK:5.0},
+    /* v7 4h Donchian breakout (CXVAL live engine) */ donN:55,donStopK:2.0,donTrailK:5.0,loose:0},
   /* v5 auto-trading: paper by default; testnet/live need the local trade helper and a trading key held in memory */
   exec:{venue:"paper",helper:"http://127.0.0.1:8788",maxContracts:5,leverage:5,setLev:true,maxOrdersDay:40,maxErr:3}};
 /* v6: real-money trading is locked in this build. It stays locked until a strategy passes the out-of-sample checks on real data AND has a clean
@@ -1647,11 +1647,12 @@ function decideScan(key,day,end,T,decT){const q=inst[key],B=bars[key],sg=cfg.sig
     ex:{d:dir,entry,stop,peak:entry,locked:false,trailed:false,ema:f.ema,n:0},instr:"perp",
     rationale:"360° scanner "+(dir>0?"LONG":"SHORT")+": score "+sgn(S.score,0)+" ("+used+"); mood "+(mood.bias==null?"n/a":sgn(mood.bias,0))+"; stop "+fmt(R/entry*100,2)+"% ("+fmt(+sg.atrK,1)+"× "+tf+"-min ATR, band "+sg.minStopPct+"–"+sg.maxStopPct+"%)",
     inval:"Initial stop "+fmt(stop)+"; after a move of "+fmt(+sg.lockMult*costPct(),2)+"% the stop moves to entry + charges, then trails "+sg.giveBack+"% of the peak gain"};
-  const block=[];
-  if(mood.bias==null)block.push("mood unavailable: "+mood.why.join(", "));
+  const block=[];const LZ=+sg.loose&&cfg.exec.venue==="paper"; /* paper test: loose filters skip mood and the entry cut-off */
+  if(LZ){t.rationale+=" · LOOSE FILTER PAPER TEST";}
+  else if(mood.bias==null)block.push("mood unavailable: "+mood.why.join(", "));
   else if(mood.pause)block.push("volatility spike: BTC 5-minute range "+fmt(mood.spike,1)+"× normal");
   else if(!(dir>0?mood.long:mood.short))block.push("mood "+sgn(mood.bias,0)+" does not permit "+(dir>0?"longs":"shorts"));
-  const cut=toMin(sg.cutoff)||1200;if(end>cut)block.push("after "+sg.cutoff+" UTC cutoff");
+  const cut=toMin(sg.cutoff)||1200;if(!LZ&&end>cut)block.push("after "+sg.cutoff+" UTC cutoff");
   const sp=spreadBps(q);if(sp!=null&&sp>sg.maxSpreadBps)block.push("spread "+fmt(sp,1)+" bps > "+sg.maxSpreadBps);
   if(q.qv24>0&&+sg.minQv>0&&q.qv24<+sg.minQv)block.push("24h volume $"+big(q.qv24)+" below $"+big(+sg.minQv));
   const ev=eventWindow(T);if(ev.length)block.push("event window: "+ev[0].text);
@@ -2001,7 +2002,7 @@ async function stopAndCloseAll(){stopAuto("stopped by you (close all)");const sy
 function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg.sig,E=cfg.exec,C=cfg.risk;
   if(!el.dataset.built){el.dataset.built="1";el.innerHTML='<div class="au-top"><span id="au-pill" class="au-pill"></span>'+
     '<label class="lb" for="au-strat">Engine</label><select class="s" id="au-strat"><option value="scan">360° Scanner (5m multi-factor + 3-stage ratchet)</option><option value="donchian">4h Donchian Breakout (CXVAL validated 55-bar)</option></select><label class="lb" for="au-venue">Execution</label><select class="s" id="au-venue"><option value="paper">Paper (no orders)</option><option value="testnet"'+(MOBILE_PAPER?' disabled':'')+'>Delta testnet (test money)'+(MOBILE_PAPER?' · needs computer':'')+'</option><option value="live"'+(LIVE_LOCKED?' disabled':'')+'>Delta LIVE (real money)'+(LIVE_LOCKED?' · locked in v6':'')+'</option></select>'+
-    '<button class="btn pri" id="au-start" type="button">▶ Start auto-trading</button><button class="btn" id="au-stop" type="button">■ Stop</button><button class="btn warn" id="au-kill" type="button">■ Stop + close all</button><button class="btn" id="au-reset" type="button">↺ Reset paper</button><span class="msg" id="au-msg"></span></div>'+
+    '<button class="btn pri" id="au-start" type="button">▶ Start auto-trading</button><button class="btn" id="au-stop" type="button">■ Stop</button><button class="btn warn" id="au-kill" type="button">■ Stop + close all</button><button class="btn" id="au-reset" type="button">↺ Reset paper</button><button class="btn" id="au-loose" type="button">⚡ Loose filters (paper test)</button><span class="msg" id="au-msg"></span></div>'+
     '<div class="au-grid"><div class="fbox"><h3>Market mood</h3><div id="au-mood"></div></div><div class="fbox"><h3>Safety limits</h3><div id="au-caps"></div></div>'+
     '<div class="fbox"><h3>Trading key (testnet / live only)</h3><div class="note">Create a Delta key with <b>trading</b> permission and <b>no withdrawal</b>, restricted to your IP. It stays in this tab\'s memory only and is never saved.</div>'+
     '<div class="fld"><label for="au-key">API key</label><input id="au-key" type="password" autocomplete="off"></div><div class="fld"><label for="au-sec">API secret</label><input id="au-sec" type="password" autocomplete="off"></div>'+
@@ -2013,7 +2014,7 @@ function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg
     $("au-strat").onchange=()=>{if(AUTO.on){$("au-strat").value=cfg.sig.strat;$("au-msg").textContent="Stop the bot before switching strategy engine.";return;}cfg.sig.strat=$("au-strat").value;saveCfg();if(cfg.sig.strat==="donchian"&&mode==="live")pollDonchianLive();dirty.all=true;renderAuto();};
     $("au-venue").value=E.venue;$("au-venue").onchange=()=>{if(AUTO.on){$("au-venue").value=AUTO.venue;$("au-msg").textContent="Stop first to change the execution venue.";return;}
       if(MOBILE_PAPER&&$("au-venue").value!=="paper"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=MOBILE_WHY;return;}if(LIVE_LOCKED&&$("au-venue").value==="live"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=LIVE_LOCK_WHY;return;}cfg.exec.venue=$("au-venue").value;saveCfg();dirty.all=true;renderAuto();};
-    $("au-start").onclick=startAuto;$("au-stop").onclick=()=>stopAuto();$("au-kill").onclick=stopAndCloseAll;$("au-reset").onclick=mobResetPaper;
+    $("au-start").onclick=startAuto;$("au-stop").onclick=()=>stopAuto();$("au-kill").onclick=stopAndCloseAll;$("au-reset").onclick=mobResetPaper;$("au-loose").onclick=mobLooseToggle;mobLooseLabel();
     $("au-key").value=TRADE.key;$("au-sec").value=TRADE.secret;const ki=()=>{TRADE.key=$("au-key").value.trim();TRADE.secret=$("au-sec").value.trim();};$("au-key").oninput=ki;$("au-sec").oninput=ki;
     $("au-forget").onclick=()=>{TRADE.key="";TRADE.secret="";$("au-key").value="";$("au-sec").value="";$("au-hmsg").textContent="Trading key cleared from memory.";};
     $("au-helper").onclick=async()=>{const h=$("au-hmsg");h.className="msg";h.textContent="Checking…";try{const s=await helperStatus();h.className="msg up";h.textContent="Helper "+(s.version||"")+": "+(s.trade?"trading ON":"read-only")+" · venue "+s.venue+" · max "+s.maxContracts+" contracts/order · max leverage "+s.maxLeverage+"×";}catch(e){h.className="msg dn";h.textContent=friendly(e)+" · start crypto_trade_helper.py --trade --testnet";}};
@@ -3378,6 +3379,16 @@ setTimeout(()=>{if(mode==="live")mobConnect();},700);
 (function(){const el=$("clock-ist");const p=(n,w)=>String(n).padStart(w,"0");
   setInterval(()=>{if(document.hidden||!el)return;const d=new Date(now()+19800000);
     el.textContent="IST "+p(d.getUTCHours(),2)+":"+p(d.getUTCMinutes(),2)+":"+p(d.getUTCSeconds(),2)+"."+p(d.getUTCMilliseconds(),3);},47);})();
+/* mobile: one-tap loose filters for a paper-only experiment (shows what happens when most safety filters are off). Saves and restores the previous values. */
+const LOOSE_SET={scanMin:40,edgeMult:0,chaseZ:0,maxPerCoinDay:0,cooldown:5,maxSpreadBps:30,minQv:0};
+function mobLooseLabel(){const b=$("au-loose");if(!b)return;const on=!!+cfg.sig.loose;b.textContent=on?"✓ Loose filters ON · tap to restore safe":"⚡ Loose filters (paper test)";b.className="btn"+(on?" warn":"");}
+function mobLooseToggle(){const m=$("au-msg"),sg=cfg.sig;const say=(t,c)=>{if(m){m.className="msg "+(c||"");m.textContent=t;}};
+  if(!+sg.loose){if(cfg.exec.venue!=="paper"){say("Loose filters are for paper trading only.","dn");return;}
+    const bak={};Object.keys(LOOSE_SET).forEach(k=>bak[k]=sg[k]);store.set("looseBak",bak);Object.assign(sg,LOOSE_SET);sg.loose=1;
+    say("Loose filters ON (paper only): score ±40, no edge/chase/mood/cut-off checks, no per-coin limit, 5 min cooldown. Expect many more trades; watch the Account tab P&L after charges.","am");}
+  else{const bak=store.get("looseBak",null);if(bak&&typeof bak==="object")Object.keys(LOOSE_SET).forEach(k=>{if(bak[k]!=null&&bak[k]!=="")sg[k]=bak[k];});else Object.keys(LOOSE_SET).forEach(k=>sg[k]=DEF.sig[k]);
+    sg.loose=0;say("Safe filters restored.","");}
+  saveCfg();mobLooseLabel();dirty.all=true;}
 /* mobile: reset the paper book so a strategy test can start again */
 let mobResetArm=0;
 function mobResetPaper(){const m=$("au-msg");const say=(t,c)=>{if(m){m.className="msg "+(c||"");m.textContent=t;}};
