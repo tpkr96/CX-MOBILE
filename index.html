@@ -778,9 +778,10 @@ const DEF={ver:1,ex:"binance",auto:30,
   cost:{spotBps:10,perpBps:5,fundBps:1,optPct:0.03,optCapPct:12.5,dOptPct:0.01,dOptCapPct:3.5,gst:18,tdsPct:0,slipBps:5}, /* v6: GST 18% (Delta India); Delta product API 18 Oct 2026: taker 0.05%, maker 0.02% */
   opt:{ctBTC:0.01,ctETH:0.1,r:0,q:0,modelIv:0,expUtc:"08:00",maxChainAge:120,maxSpreadPct:10,minOI:1,minVol:0,chainUrl:"",chainCsv:""},
   sig:{orMin:60,tf:5,rsMin:1,rvMin:1.5,rMult:2,minStopPct:0.3,maxStopPct:3,cutoff:"20:00",exitBy:"23:45",staleWs:15,staleRest:90,minCov:80,maxSkewSec:60,maxSpreadBps:10,eventWin:15,breadthHi:1.5,breadthLo:0.67,volLo:35,volHi:75,
-    /* v5 360° scanner */ strat:"scan",scanMin:60,scanLook:5,atrN:14,atrK:2,lockMult:2,lockBuf:0.02,giveBack:40,fadeEma:9,timeStop:15,maxHold:120,cooldown:10,lossCool:2,coolMin:30,
-    moodTh:1,moodBrHi:60,moodBrLo:40,volPause:3,minQv:2000000,scanWarm:30,scanBtc:1,scanTopN:30,wMom:30,wVol:15,wFlow:15,wBook:10,wBrk:20,wFund:10,
-    /* v6 entry safety */ scanTf:1,chaseZ:2.5,edgeMult:2,liqSafety:50,mmrPct:0.5,fundWin:10,fundMin:0.0001,maxPerCoinDay:4},
+    /* v5 360° scanner */ strat:"scan",scanMin:52,scanLook:4,atrN:14,atrK:1.8,lockMult:3.0,lockBuf:0.04,giveBack:35,fadeEma:9,timeStop:30,maxHold:180,cooldown:15,lossCool:2,coolMin:30,
+    moodTh:1,moodBrHi:56,moodBrLo:44,volPause:3.8,minQv:1500000,scanWarm:15,scanBtc:1,scanTopN:30,wMom:35,wVol:20,wFlow:10,wBook:5,wBrk:20,wFund:10,
+    /* v6 entry safety (profit-tuned for 5m horizon) */ scanTf:5,chaseZ:2.8,edgeMult:1.8,liqSafety:55,mmrPct:0.5,fundWin:10,fundMin:0.00015,maxPerCoinDay:3,
+    /* v7 4h Donchian breakout (CXVAL live engine) */ donN:55,donStopK:2.0,donTrailK:5.0},
   /* v5 auto-trading: paper by default; testnet/live need the local trade helper and a trading key held in memory */
   exec:{venue:"paper",helper:"http://127.0.0.1:8788",maxContracts:5,leverage:5,setLev:true,maxOrdersDay:40,maxErr:3}};
 /* v6: real-money trading is locked in this build. It stays locked until a strategy passes the out-of-sample checks on real data AND has a clean
@@ -793,7 +794,8 @@ let cfg=(function(){const c=store.get("cfg",{})||{};const o=Object.assign({},DEF
 /* v4: stored settings are sanitised on load: non-numeric numbers fall back to defaults, unsafe endpoint URLs to the default endpoint */
 function sanitizeCfg(o){if(!o.exec)o.exec=Object.assign({},DEF.exec);if(!["paper","testnet","live"].includes(o.exec.venue))o.exec.venue="paper";if(LIVE_LOCKED&&o.exec.venue==="live")o.exec.venue="paper";if(MOBILE_PAPER&&o.exec.venue!=="paper")o.exec.venue="paper";
   /* v6 one-time migration: Delta India charges 18% GST on fees; a stored 0 from v5 is lifted once (you can set it back in Settings) */
-  if(!o.v6mig){o.v6mig=1;if(o.cost&&+o.cost.gst===0&&o.ex==="delta")o.cost.gst=18;}if(!["scan","orb"].includes(o.sig.strat))o.sig.strat=DEF.sig.strat;
+  if(!o.v6mig){o.v6mig=1;if(o.cost&&+o.cost.gst===0&&o.ex==="delta")o.cost.gst=18;}if(!o.v7mig){o.v7mig=1;if(o.sig&&+o.sig.scanTf===1&&+o.sig.scanMin===60){Object.assign(o.sig,{scanTf:5,scanMin:52,scanLook:4,atrK:1.8,lockMult:3.0,lockBuf:0.04,giveBack:35,timeStop:30,maxHold:180,cooldown:15,moodBrHi:56,moodBrLo:44,volPause:3.8,minQv:1500000,scanWarm:15,wMom:35,wVol:20,wFlow:10,wBook:5,chaseZ:2.8,edgeMult:1.8,liqSafety:55,fundMin:0.00015,maxPerCoinDay:3});}}
+  if(!["scan","donchian","orb"].includes(o.sig.strat))o.sig.strat=DEF.sig.strat;
   if(!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(String(o.exec.helper||"")))o.exec.helper=DEF.exec.helper;o.exec.setLev=o.exec.setLev!==false&&o.exec.setLev!=="false";
   ["risk","cost","opt","sig","exec"].forEach(g=>Object.keys(DEF[g]).forEach(k=>{if(typeof DEF[g][k]==="number"){if(o[g][k]===""||o[g][k]===null||!isFinite(+o[g][k]))o[g][k]=DEF[g][k];else o[g][k]=+o[g][k];}}));
   ["auto","wCap","bigUsd","printUsd"].forEach(k=>{if(o[k]===""||o[k]===null||!isFinite(+o[k]))o[k]=DEF[k];});
@@ -1463,7 +1465,8 @@ function withSnapshot(day,end,T,fn){if(SNAP.key!==day+"|"+end||SNAP.T!==T)Object
    v3 timing: signal time = bar end T; entry eligible from the next bar's open (T); the decision is made when the close becomes known (decT),
    on a snapshot as of T. Fill time and price are recorded separately (backtest: next bar open + slippage; paper journal: your entry). */
 function onBarClose(key,isIx,bar,base){
-  if(cfg.sig.strat==="scan"){if(isIx||!inst[key]||!bars[key])return;const end=bar.m+(base||1),day=bars[key].day,T=utMs(day,end),decT=now();
+  if(cfg.sig.strat==="scan"||cfg.sig.strat==="donchian"){if(isIx||!inst[key]||!bars[key])return;const end=bar.m+(base||1),day=bars[key].day,T=utMs(day,end),decT=now();
+    if(cfg.sig.strat==="donchian"){if(scanOpen[key])scanTrack(scanOpen[key],bar,end,base||1);return;}
     withSnapshot(day,end,T,()=>decideScan(key,day,end,T,decT));return;} /* v5: the 360° scanner decides on every completed bar */
   const tf=Math.max(+cfg.sig.tf||5,base||1),end=bar.m+(base||1);if(isIx||end%tf!==0)return;if(!inst[key]||!bars[key])return;
   const day=bars[key].day,T=utMs(day,end),decT=now();
@@ -1488,7 +1491,8 @@ function decideBar(key,day,end,T,decT,tf,ctx){const q=inst[key];
   if(sp<sg.minStopPct||sp>sg.maxStopPct)block.push("stop distance "+fmt(sp,2)+"% outside "+sg.minStopPct+"–"+sg.maxStopPct+"%");
   if(v.spread!=null&&v.spread>sg.maxSpreadBps)block.push("spread "+fmt(v.spread,1)+" bps > "+sg.maxSpreadBps);
   const ev=eventWindow(t.t);if(ev.length)block.push("event window: "+ev[0].text);
-  if(lag>staleLimit(q))block.push("decision late: the bar close was known only "+ageStr(lag)+" after the bar ended");
+  if(mode==="live"&&!fresh(q))block.push("quote is stale ("+ageStr(age(q))+")");
+  else if(lag>Math.max(90,staleLimit(q)*2))block.push("decision late: the bar close was known only "+ageStr(lag)+" after the bar ended");
   if(block.length){t.state="NO-TRADE";t.reason=block.join("; ");}
   else if(v.spread==null)t.reason="spread not observed";
   triggers.set(id,t);sigLog.unshift(t);if(sigLog.length>300)sigLog.pop();
@@ -1535,17 +1539,19 @@ function cumVwap(key,L,n){if(!L||!n||L[0].m>1)return null;let c=vwC[key];if(!c||
 function costPctOf(C){return (2*(+C.perpBps||0)/1e4*(1+(+C.gst||0)/100)+2*(+C.slipBps||0)/1e4)*100;}
 function costPct(){return costPctOf(cfg.cost);}
 /* features of the first n (completed) bars of L. Pure; unit-tested. */
-function scanFeat(L,n,o){if(!L||n<30||n>L.length)return null;const i=n-1,b=L[i],k=Math.max(1,Math.min(30,(o.look|0)||5));
-  const r=[];for(let j=Math.max(1,n-60);j<n;j++)if(L[j-1].c>0&&L[j].c>0)r.push(Math.log(L[j].c/L[j-1].c));if(r.length<20)return null;
+function scanFeat(L,n,o){if(!L||n<16||n>L.length)return null;const i=n-1,b=L[i],k=Math.max(1,Math.min(20,(o.look|0)||4));if(i<k)return null;
+  const r=[];for(let j=Math.max(1,n-60);j<n;j++)if(L[j-1].c>0&&L[j].c>0)r.push(Math.log(L[j].c/L[j-1].c));if(r.length<12)return null;
   const mu=r.reduce((a,x)=>a+x,0)/r.length,sd=Math.sqrt(r.reduce((a,x)=>a+(x-mu)*(x-mu),0)/(r.length-1));if(!(sd>0))return null;
   const ret=Math.log(b.c/L[i-k].c),z=ret/(sd*Math.sqrt(k));
   let vr=0;for(let j=i-k+1;j<=i;j++)vr+=L[j].v;vr/=k;let vb=0,nb=0;for(let j=Math.max(0,n-61);j<=i-k;j++){vb+=L[j].v;nb++;}vb=nb?vb/nb:0;const rv=vb>0?vr/vb:null;
-  let tb=0,tv=0,hasTb=true;for(let j=Math.max(0,i-2);j<=i;j++){if(L[j].tb==null){hasTb=false;break;}tb+=L[j].tb;tv+=L[j].v;}
-  let hi=-Infinity,lo=Infinity;for(let j=Math.max(0,n-61);j<i;j++){if(L[j].h>hi)hi=L[j].h;if(L[j].l<lo)lo=L[j].l;}
+  let tb=0,tv=0,hasTb=true,clvS=0,clvV=0;for(let j=Math.max(0,i-2);j<=i;j++){if(L[j].tb==null)hasTb=false;else tb+=L[j].tb;tv+=L[j].v;const rg=L[j].h-L[j].l;if(rg>0){clvS+=((L[j].c-L[j].l)/rg*2-1)*(L[j].v||1);clvV+=(L[j].v||1);}}
+  const flow=hasTb&&tv>0?clamp((2*tb/tv-1)*3,-1,1):(clvV>0?clamp(clvS/clvV*1.25,-1,1):null);
+  let hi=-Infinity,lo=Infinity;for(let j=Math.max(0,n-48);j<i;j++){if(L[j].h>hi)hi=L[j].h;if(L[j].l<lo)lo=L[j].l;}
   const an=Math.max(2,(o.atrN|0)||14);let tr=0,nt=0;for(let j=Math.max(1,n-an);j<n;j++){tr+=Math.max(L[j].h,L[j-1].c)-Math.min(L[j].l,L[j-1].c);nt++;}const atr=nt?tr/nt:null;
   const ep=(o.ema|0)||0;let ema=null;if(ep>0){const a=2/(ep+1);for(let j=Math.max(0,n-3*ep);j<n;j++)ema=ema==null?L[j].c:ema+a*(L[j].c-ema);}
-  const vw=o.vwap>0?o.vwap:null;const brk=vw==null?null:b.c>hi&&b.c>vw?1:b.c<lo&&b.c<vw?-1:b.c>vw?0.3:b.c<vw?-0.3:0;
-  return {c:b.c,z,ret:ret*100,mom:clamp(z/3,-1,1),rv,vol:rv==null?null:Math.sign(ret)*clamp((rv-1)/2,0,1),flow:hasTb&&tv>0?clamp((2*tb/tv-1)*3,-1,1):null,
+  const vw=o.vwap>0?o.vwap:null,chPos=hi>lo?(b.c-lo)/(hi-lo):0.5;
+  const brk=vw==null?null:b.c>hi&&b.c>vw?1:b.c<lo&&b.c<vw?-1:b.c>vw&&chPos>=0.82?0.7:b.c<vw&&chPos<=0.18?-0.7:b.c>vw?0.25:b.c<vw?-0.25:0;
+  return {c:b.c,z,ret:ret*100,mom:clamp(z/2.6,-1,1),rv,vol:rv==null?null:Math.sign(ret)*clamp((rv-1)/1.8,0,1),flow,
     hi,lo,vwap:vw,brk,atr,atrPct:atr!=null?atr/b.c*100:null,ema,sd};}
 /* weighted score −100…+100 from the components in hand */
 function scanScore(f,x,o){const comp={mom:f.mom,vol:f.vol,flow:f.flow,book:x?x.book:null,brk:f.brk,fund:x?x.fund:null};let s=0,w=0,wAll=0;const used=[];
@@ -1602,10 +1608,12 @@ function scanMood(live){const sg=cfg.sig,B=bars.BTC;const nOf=L=>L?Math.max(0,L.
 function scanStep(s,b,o){const d=s.d;
   if(d>0?b.l<=s.stop:b.h>=s.stop)return {exit:d>0?Math.min(b.o,s.stop):Math.max(b.o,s.stop),why:s.trailed?"trail":s.locked?"lock":"stop"};
   s.peak=d>0?Math.max(s.peak,b.h):Math.min(s.peak,b.l);s.n=(s.n||0)+1;const fav=(s.peak/s.entry-1)*d*100;
-  if(!s.locked&&+o.lockMult>0&&fav>=o.lockMult*o.cost){s.locked=true;const lv=s.entry*(1+d*(o.cost+(+o.lockBuf||0))/100);s.lockLvl=lv;if(d>0?lv>s.stop:lv<s.stop)s.stop=lv;}
-  if(s.locked&&+o.giveBack>0){const tr=s.peak-d*Math.abs(s.peak-s.entry)*o.giveBack/100;if(d>0?tr>s.stop:tr<s.stop){s.stop=tr;s.trailed=true;}}
+  if(s.donchian){const tr=d>0?s.peak-s.trailDist:s.peak+s.trailDist;if(d>0?tr>s.stop:tr<s.stop){s.stop=tr;s.trailed=true;}const held=s.n*(o.base||1);if(+o.maxHold>0&&held>=+o.maxHold)return {exit:b.c,why:"maxhold"};return null;}
+  const lockTrig=(+o.lockMult||3)*o.cost;
+  if(!s.locked&&+o.lockMult>0&&fav>=lockTrig){s.locked=true;const lv=s.entry*(1+d*(o.cost+(+o.lockBuf||0.04))/100);s.lockLvl=lv;if(d>0?lv>s.stop:lv<s.stop)s.stop=lv;}
+  if(s.locked&&+o.giveBack>0&&fav>=lockTrig*2.0){const tr=s.peak-d*Math.abs(s.peak-s.entry)*o.giveBack/100;if(d>0?tr>s.stop:tr<s.stop){s.stop=tr;s.trailed=true;}}
   if(+o.ema>0){const a=2/(+o.ema+1);s.ema=s.ema==null?b.c:s.ema+a*(b.c-s.ema);}
-  if(s.locked&&+o.ema>0&&s.n>=2&&(d>0?b.c<s.ema:b.c>s.ema))return {exit:b.c,why:"fade"};
+  if(s.trailed&&+o.ema>0&&s.n>=4&&(d>0?b.c<s.ema:b.c>s.ema))return {exit:b.c,why:"fade"};
   const held=s.n*(o.base||1);
   if(!s.locked&&+o.timeStop>0&&held>=+o.timeStop)return {exit:b.c,why:"time"};
   if(+o.maxHold>0&&held>=+o.maxHold)return {exit:b.c,why:"maxhold"};
@@ -1664,9 +1672,55 @@ function scanExit(t,px,why,ts){if(t.state!=="TRIGGERED")return;t.state=EXIT_LBL[
   if(scanOpen[t.sym]===t)delete scanOpen[t.sym];
   if(!btActive){pushTape({t:ts,sym:t.sym,kind:"signal",txt:"360 "+t.state+" "+t.sym+" @ "+fmt(px)+" ("+pc((px/t.entry-1)*100*t.dir)+" before costs)",src:mode});autoOnExit(t,px,why);}}
 /* ranked board for the Auto 360 view: every coin's score on its completed bars */
-function scanBoard(){const sg=cfg.sig,out=[];const live=true;Object.keys(inst).forEach(s=>{const B=bars[s],q=inst[s];const row={sym:s,q,state:scanOpen[s]?"OPEN":"",score:null};
-  if(B&&B.list.length>1){const n=B.list.length-(live?1:0);const vw=cumVwap(s,B.list,n);const f=scanFeat(B.list,n,{look:sg.scanLook,atrN:sg.atrN,ema:sg.fadeEma,vwap:vw});
-    if(f){const S=scanScore(f,{book:bookImb(q),fund:fundTilt(q)},sg);Object.assign(row,{f,S,score:S.score});}}
+const donState={};let donBusy=false,donLastPoll=0;
+async function pollDonchianLive(){
+  if(donBusy||mode!=="live"||btActive||typeof CXVAL==="undefined")return;
+  donBusy=true;donLastPoll=Date.now();
+  try{
+    const mk=svMarket(),nowMs=Date.now(),end=Math.floor(nowMs/SV_H)*SV_H,start=end-16*864e5;
+    if(cfg.ex==="delta"){try{await DLT.loadProducts();}catch(e){}}
+    const syms=Object.keys(inst).filter(b=>!inst[b].missing).slice(0,25);
+    await pool(syms,3,async b=>{
+      try{
+        const raw=await svCandles(b,mk,start,end);
+        const cl=CXVAL.cleanBars(raw,SV_H,{nowMs});
+        const closed=cl.bars.filter(x=>x.t+SV_H<=nowMs);
+        const c4=CXVAL.resample(closed,SV_H,SV_TF,nowMs).bars;
+        const N=+cfg.sig.donN||55,atrN=+cfg.sig.atrN||14;
+        if(c4.length>Math.max(N,atrN)){
+          const a=CXVAL.atr(c4,atrN),i=c4.length-1,A=a[i],lastB=c4[i];
+          let up=-Infinity,dn=Infinity;
+          for(let k=i-N;k<i;k++){if(c4[k].h>up)up=c4[k].h;if(c4[k].l<dn)dn=c4[k].l;}
+          const mid=(up+dn)/2,span=(up-dn)/2||1,prox=clamp((lastB.c-mid)/span*100,-100,100);
+          const brk=lastB.c>up?1:lastB.c<dn?-1:clamp((lastB.c-mid)/span,-0.9,0.9);
+          donState[b]={up,dn,atr:A,atrPct:A>0?A/lastB.c*100:null,c:lastB.c,decideT:lastB.t+SV_TF,prox,brk,mom:brk};
+          if(cfg.sig.strat==="donchian"&&!scanOpen[b]&&nowMs-(lastB.t+SV_TF)<45*60e3&&(lastB.c>up||lastB.c<dn)){
+            const dir=lastB.c>up?1:-1,day=ut(lastB.t+SV_TF).day,endM=ut(lastB.t+SV_TF).m;
+            const idKey=b+"|DON|"+(lastB.t+SV_TF);
+            if(!triggers.has(idKey)){
+              const kStop=+cfg.sig.donStopK||2.0,kTrail=+cfg.sig.donTrailK||5.0,stop=lastB.c-dir*kStop*A;
+              const t={id:"D"+hash(idKey).toString(36),strat:"scan",sym:b,day,dir,t:lastB.t+SV_TF,sigT:lastB.t+SV_TF,eligT:lastB.t+SV_TF,decT:nowMs,lagS:0,fillT:null,fill:null,sizeMult:1,m:endM,entry:lastB.c,stop,initStop:stop,target:null,R:kStop*A,stopPct:(kStop*A)/lastB.c*100,
+                score:dir*100,comp:{brk:dir,mom:dir},used:["brk","mom"],cover:100,ema0:null,regime:"4H DONCHIAN "+N,state:"TRIGGERED",reason:"",mode,
+                ex:{d:dir,entry:lastB.c,stop,peak:lastB.c,locked:true,trailed:false,donchian:true,trailDist:kTrail*A,n:0},instr:mk.market==="spot"?"spot":"perp",
+                rationale:"4h Donchian ("+N+") "+(dir>0?"LONG":"SHORT")+" breakout: 4h close "+fmt(lastB.c)+(dir>0?" > channel high "+fmt(up):" < channel low "+fmt(dn))+"; initial stop "+fmt(stop)+" ("+kStop+"× 4h ATR), trailing "+kTrail+"× 4h ATR",
+                inval:"Initial stop "+fmt(stop)+"; ratchets by "+kTrail+"× 4h ATR ("+fmt(kTrail*A)+") from peak"};
+              if(mk.market==="spot"&&dir<0){t.state="NO-TRADE";t.reason="spot market is long-only";}
+              triggers.set(idKey,t);if(t.state==="TRIGGERED"){scanOpen[b]=t;autoOnSignal(t);}
+              sigLog.unshift(t);if(sigLog.length>300)sigLog.pop();
+              pushTape({t:nowMs,sym:b,kind:"signal",txt:"4H DONCHIAN "+(dir>0?"LONG ":"SHORT ")+fmt(lastB.c)+" stop "+fmt(stop),src:mode});
+            }
+          }
+        }
+      }catch(e){}
+    });
+  }finally{donBusy=false;dirty.all=true;}
+}
+setInterval(()=>{if(mode==="live"&&!btActive&&!document.hidden&&cfg.sig.strat==="donchian"&&Date.now()-donLastPoll>5*60e3)pollDonchianLive();},30000);
+function scanBoard(){const sg=cfg.sig,out=[],tf=Math.max(1,+sg.scanTf||5);Object.keys(inst).forEach(s=>{const B=bars[s],q=inst[s];const row={sym:s,q,state:scanOpen[s]?"OPEN":"",score:null};
+  if(sg.strat==="donchian"&&donState[s]){const ds=donState[s];row.score=ds.prox;row.f={atrPct:ds.atrPct};row.S={comp:{mom:ds.mom,vol:null,flow:null,book:bookImb(q),brk:ds.brk,fund:fundTilt(q)}};}
+  else if(B&&B.list.length>1){const n=B.list.length-1;if(n>0){const vw=cumVwap(s,B.list,n),closed=B.list.slice(0,n),FL=tf>1?aggBars(closed,tf):closed;
+    const f=scanFeat(FL,FL.length,{look:sg.scanLook,atrN:sg.atrN,ema:sg.fadeEma,vwap:vw});
+    if(f){const S=scanScore(f,{book:bookImb(q),fund:fundTilt(q)},sg);Object.assign(row,{f,S,score:S.score});}}}
   out.push(row);});out.sort((a,b)=>Math.abs(b.score||0)-Math.abs(a.score||0)||(a.sym<b.sym?-1:1));return out;}
 /* ---------- 7. risk engine (enforced on every journal entry, paper and v5 auto-trading alike) ---------- */
 /* kind: SPOT | PERP. Fees in bps of traded value, GST on fees (Indian venues), TDS on spot sells (India, VDA). Funding is not included. */
@@ -1907,7 +1961,8 @@ async function autoGone(P){let px=null,src="assumed = exchange stop "+fmt(P.exSt
   const e=journal.find(y=>y.id===P.jid&&y.status==="open");if(e)closeJournal(e,px!=null?px:P.exStop,"360 closed on the exchange (price "+src+")");}
 async function startAuto(){const v=cfg.exec.venue;const m=$("au-msg");const say=(t,c)=>{if(m){m.className="msg "+(c||"");m.textContent=t;}};
   if(AUTO.on){say("Already running ("+venueName(AUTO.venue)+").");return;}
-  if(cfg.sig.strat!=="scan"){say("Set Settings → 360° scanner → Strategy to “360° scanner” first.","dn");return;}
+  if(cfg.sig.strat!=="scan"&&cfg.sig.strat!=="donchian"){say("Set Strategy to “360° scanner” or “4h Donchian breakout” first.","dn");return;}
+  if(cfg.sig.strat==="donchian"&&mode==="live")pollDonchianLive();
   if(LIVE_LOCKED&&v==="live"){cfg.exec.venue="paper";saveCfg();say(LIVE_LOCK_WHY,"dn");return;} /* v6 */
   if(MOBILE_PAPER&&v!=="paper"){cfg.exec.venue="paper";saveCfg();say(MOBILE_WHY,"dn");return;} /* mobile */
   if(btActive){say("A backtest is running.","dn");return;}
@@ -1945,7 +2000,7 @@ async function stopAndCloseAll(){stopAuto("stopped by you (close all)");const sy
 /* Auto 360 view */
 function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg.sig,E=cfg.exec,C=cfg.risk;
   if(!el.dataset.built){el.dataset.built="1";el.innerHTML='<div class="au-top"><span id="au-pill" class="au-pill"></span>'+
-    '<label class="lb" for="au-venue">Execution</label><select class="s" id="au-venue"><option value="paper">Paper (no orders)</option><option value="testnet"'+(MOBILE_PAPER?' disabled':'')+'>Delta testnet (test money)'+(MOBILE_PAPER?' · needs computer':'')+'</option><option value="live"'+(LIVE_LOCKED?' disabled':'')+'>Delta LIVE (real money)'+(LIVE_LOCKED?' · locked in v6':'')+'</option></select>'+
+    '<label class="lb" for="au-strat">Engine</label><select class="s" id="au-strat"><option value="scan">360° Scanner (5m multi-factor + 3-stage ratchet)</option><option value="donchian">4h Donchian Breakout (CXVAL validated 55-bar)</option></select><label class="lb" for="au-venue">Execution</label><select class="s" id="au-venue"><option value="paper">Paper (no orders)</option><option value="testnet"'+(MOBILE_PAPER?' disabled':'')+'>Delta testnet (test money)'+(MOBILE_PAPER?' · needs computer':'')+'</option><option value="live"'+(LIVE_LOCKED?' disabled':'')+'>Delta LIVE (real money)'+(LIVE_LOCKED?' · locked in v6':'')+'</option></select>'+
     '<button class="btn pri" id="au-start" type="button">▶ Start auto-trading</button><button class="btn" id="au-stop" type="button">■ Stop</button><button class="btn warn" id="au-kill" type="button">■ Stop + close all</button><button class="btn" id="au-reset" type="button">↺ Reset paper</button><span class="msg" id="au-msg"></span></div>'+
     '<div class="au-grid"><div class="fbox"><h3>Market mood</h3><div id="au-mood"></div></div><div class="fbox"><h3>Safety limits</h3><div id="au-caps"></div></div>'+
     '<div class="fbox"><h3>Trading key (testnet / live only)</h3><div class="note">Create a Delta key with <b>trading</b> permission and <b>no withdrawal</b>, restricted to your IP. It stays in this tab\'s memory only and is never saved.</div>'+
@@ -1954,6 +2009,8 @@ function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg
     '<div class="au-grid2"><div class="fbox"><h3>Ranked coins <span class="note" id="au-rk-n"></span></h3><div class="fbox" style="padding:0;border:0"><table class="t" id="au-rank"></table></div>'+
     '<div style="display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap"><label class="lb" for="au-topn">Scan the top</label><input class="s" id="au-topn" type="number" min="5" max="150" value="'+(+sg.scanTopN||30)+'" style="width:56px"><span class="lb">Delta perpetuals by 24h volume</span><button class="btn" id="au-uni" type="button">Load list</button><span class="msg" id="au-umsg"></span></div></div>'+
     '<div><div class="fbox"><h3>Open positions</h3><div id="au-pos"></div></div><div class="fbox" style="margin-top:8px"><h3>Bot log</h3><div id="au-log" class="au-log"></div></div></div></div>';
+    $("au-strat").value=sg.strat==="donchian"?"donchian":"scan";
+    $("au-strat").onchange=()=>{if(AUTO.on){$("au-strat").value=cfg.sig.strat;$("au-msg").textContent="Stop the bot before switching strategy engine.";return;}cfg.sig.strat=$("au-strat").value;saveCfg();if(cfg.sig.strat==="donchian"&&mode==="live")pollDonchianLive();dirty.all=true;renderAuto();};
     $("au-venue").value=E.venue;$("au-venue").onchange=()=>{if(AUTO.on){$("au-venue").value=AUTO.venue;$("au-msg").textContent="Stop first to change the execution venue.";return;}
       if(MOBILE_PAPER&&$("au-venue").value!=="paper"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=MOBILE_WHY;return;}if(LIVE_LOCKED&&$("au-venue").value==="live"){$("au-venue").value="paper";$("au-msg").className="msg dn";$("au-msg").textContent=LIVE_LOCK_WHY;return;}cfg.exec.venue=$("au-venue").value;saveCfg();dirty.all=true;renderAuto();};
     $("au-start").onclick=startAuto;$("au-stop").onclick=()=>stopAuto();$("au-kill").onclick=stopAndCloseAll;$("au-reset").onclick=mobResetPaper;
@@ -1962,7 +2019,8 @@ function renderAuto(){const el=$("v-auto");if(!el||el.hidden)return;const sg=cfg
     $("au-helper").onclick=async()=>{const h=$("au-hmsg");h.className="msg";h.textContent="Checking…";try{const s=await helperStatus();h.className="msg up";h.textContent="Helper "+(s.version||"")+": "+(s.trade?"trading ON":"read-only")+" · venue "+s.venue+" · max "+s.maxContracts+" contracts/order · max leverage "+s.maxLeverage+"×";}catch(e){h.className="msg dn";h.textContent=friendly(e)+" · start crypto_trade_helper.py --trade --testnet";}};
     $("au-uni").onclick=loadTopUniverse;}
   const pill=$("au-pill");setText(pill,AUTO.alarm?"⚠ "+AUTO.alarm.why:AUTO.on?"RUNNING · "+venueName(AUTO.venue):AUTO.stopWhy?"STOPPED · "+AUTO.stopWhy:"OFF",AUTO.alarm?"au-pill live":AUTO.on?(AUTO.venue==="live"?"au-pill live":"au-pill on"):"au-pill");
-  $("au-start").disabled=AUTO.on||sg.strat!=="scan";$("au-stop").disabled=!AUTO.on;
+  if($("au-strat"))$("au-strat").value=sg.strat==="donchian"?"donchian":"scan";
+  $("au-start").disabled=AUTO.on||(sg.strat!=="scan"&&sg.strat!=="donchian");$("au-stop").disabled=!AUTO.on;
   const md=scanMood(true);setHTML($("au-mood"),'<div class="v1 '+(md.long?"up":md.short?"dn":"mu")+'" style="font:600 15px var(--f-num)">'+(md.bias==null?"UNAVAILABLE":md.pause?"PAUSE (volatility spike)":md.long?"LONGS ALLOWED":md.short?"SHORTS ALLOWED":"NO TRADE (mixed)")+' <span class="note">bias '+(md.bias==null?"—":sgn(md.bias,0))+' of ±3 · needs ±'+sg.moodTh+'</span></div>'+
     (md.bias==null?'<div class="note">'+esc(md.why.join("; "))+'</div>':'<table class="t">'+md.parts.map(p=>'<tr><td>'+esc(p.k)+'</td><td class="'+(p.v>0?"up":p.v<0?"dn":"mu")+'">'+esc(p.txt)+'</td></tr>').join("")+'</table>'));
   const cd=autoCooldown();
@@ -2987,7 +3045,7 @@ const SET=[
    ["sig.rMult","Target (R multiple)","num"],["sig.minStopPct","Min stop distance %","num"],["sig.maxStopPct","Max stop distance %","num"],["sig.cutoff","No new triggers after (HH:MM UTC)","txt"],["sig.exitBy","Time exit (HH:MM UTC)","txt"],
    ["sig.staleWs","Stale after, streaming (s)","num"],["sig.staleRest","Stale after, REST (s)","num"],["sig.minCov","Min basket weight priced (%)","num"],["sig.maxSkewSec","Max timestamp spread (s)","num"],["sig.maxSpreadBps","Max spread (bps)","num"],["sig.eventWin","Event no-trade window (± min)","num"],
    ["sig.breadthHi","Breadth positive at A/D ≥","num"],["sig.breadthLo","Breadth negative at A/D ≤","num"],["sig.volLo","Volatility low below (annualised %)","num"],["sig.volHi","Volatility high above (annualised %)","num"]]},
- {g:"360° scanner (v5 + v6 entry gates)",f:[["sig.strat","Strategy","sel",[["scan","360° scanner: multi-coin, long/short, charges lock + trailing"],["orb","Opening-range breakout (v4)"]],"The scanner scores every coin on each completed 1-minute bar and runs the Auto 360 tab. The breakout strategy is the v4 engine, unchanged."],
+ {g:"360° scanner (v5 + v6 entry gates)",f:[["sig.strat","Strategy","sel",[["scan","360° scanner (5m profit-tuned, 3-stage ratchet)"],["donchian","4h Donchian trend breakout (55-bar CXVAL engine)"],["orb","Opening-range breakout (v4)"]],"The scanner scores every coin on each completed 1-minute bar and runs the Auto 360 tab. The breakout strategy is the v4 engine, unchanged."],
    ["sig.scanMin","Entry score threshold (1–100)","num",null,"Enter when |score| reaches this. Higher = fewer, stronger signals."],["sig.scanLook","Momentum lookback (1-minute bars)","num"],
    ["sig.atrK","Initial stop (× 1-minute ATR, kept inside the stop band)","num"],["sig.atrN","ATR length (bars)","num"],
    ["sig.lockMult","Charges lock after a move of (× round-trip charges)","num",null,"At 2: once price moves twice the charges in your favour, the stop moves to entry + charges."],["sig.lockBuf","Lock buffer above charges (%)","num"],
