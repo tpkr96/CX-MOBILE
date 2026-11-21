@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#05080f">
+<meta name="author" content="Prashanth">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="../icon-180.png">
+<title>India Bot (NSE + BSE, paper)</title>
+<style>
+:root{--bg:#05080f;--pn:#0c1220;--ln:#1c2740;--tx:#dbe4f5;--mu:#7f8daa;--up:#22c55e;--dn:#ef4444;--am:#f59e0b;--ac:#38bdf8}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:#070b15;border-bottom:1px solid var(--ln);padding:8px 12px calc(8px) 12px}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.badge{font-size:11px;padding:2px 7px;border-radius:9px;border:1px solid var(--ln);color:var(--mu);white-space:nowrap}
+.badge.paper{color:var(--am);border-color:#5a3d06}.badge.ok{color:var(--up);border-color:#14532d}.badge.bad{color:var(--dn);border-color:#5f1d1d}
+.strip{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:6px}
+.cell{background:var(--pn);border:1px solid var(--ln);border-radius:8px;padding:5px 7px}.cell b{display:block;font-size:15px}.cell small{color:var(--mu);font-size:11px}
+main{padding:10px 12px 90px}section{display:none}section.on{display:block}
+.card{background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:10px;margin-bottom:10px}
+h2{font-size:15px;margin:0 0 6px}h3{font-size:13px;margin:8px 0 4px;color:var(--mu)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}td,th{padding:5px 4px;border-bottom:1px solid var(--ln);text-align:right}td:first-child,th:first-child{text-align:left}th{color:var(--mu);font-weight:500}
+.up{color:var(--up)}.dn{color:var(--dn)}.mu{color:var(--mu)}.am{color:var(--am)}
+nav{position:fixed;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(5,1fr);background:#070b15;border-top:1px solid var(--ln);padding-bottom:env(safe-area-inset-bottom)}
+nav button{background:none;border:0;color:var(--mu);padding:10px 0 8px;font-size:12px}nav button.on{color:var(--ac)}
+button.b{background:#13203a;color:var(--tx);border:1px solid #27406b;border-radius:8px;padding:9px 12px;font-size:14px}
+button.b.pri{background:#0e4a6e;border-color:#1d6fa0}button.b.warn{background:#3a1d13;border-color:#6b3427}
+input,select{background:#0a1020;color:var(--tx);border:1px solid var(--ln);border-radius:8px;padding:9px;font-size:14px;width:100%}
+label{display:block;margin:8px 0 3px;color:var(--mu);font-size:12px}
+.note{font-size:12px;color:var(--mu)}.warnbox{border:1px solid #5a3d06;background:#1c1405;color:#f5c66b;border-radius:8px;padding:8px;font-size:12.5px;margin-bottom:10px}
+.log{font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;max-height:260px;overflow:auto;white-space:pre-wrap;color:#b8c4dc}
+.kv{display:grid;grid-template-columns:1fr auto;gap:3px 10px;font-size:13px}.kv span:nth-child(even){text-align:right}
+.bar{height:6px;background:#111a2e;border-radius:4px;overflow:hidden}.bar i{display:block;height:100%}
+</style>
+</head>
+<body>
+<header>
+  <div class="row"><b>🇮🇳 India Bot</b><span id="clock" class="mu">--:--:-- IST</span><span class="badge paper">PAPER · live locked</span></div>
+  <div class="row" style="margin-top:4px"><span id="conn" class="badge">not connected</span><span id="mkt" class="badge">market ?</span><span id="ver" class="badge">in1.0</span></div>
+  <div class="strip" id="strip"></div>
+</header>
+<main>
+<section id="t-market" class="on">
+  <div class="card"><h2>Market mood (Nifty)</h2><div id="mood" class="kv"></div><p class="note">Same mood rule as the crypto bot, with Nifty instead of BTC: Nifty vs its session VWAP, Nifty 60-minute direction, breadth of the scanned stocks, and a volatility pause.</p></div>
+  <div class="card"><h2>Indices</h2><table id="idx"><thead><tr><th>Index</th><th>Last</th><th>Day %</th><th>Bars</th></tr></thead><tbody></tbody></table></div>
+</section>
+<section id="t-scan">
+  <div class="warnbox">The 360° scanner <b>lost money</b> in the real-data test (2,248 trades, −0.28 R per trade after Indian charges). This screen shows it working on live prices for learning only. No real orders.</div>
+  <div class="card"><div class="row"><h2>360° Scanner · 5-min</h2><span id="scanstate" class="badge">idle</span></div>
+    <div class="row" style="margin:6px 0"><button class="b pri" id="btnRun">▶ Start paper bot</button><button class="b" id="btnStop">■ Stop</button></div>
+    <p class="note" id="warmnote">Scores need about 20 completed 5-minute bars per stock (about 100 minutes). Bars are kept on this phone for the day, so reopening the app does not reset the warm-up.</p>
+    <table id="board"><thead><tr><th>Stock</th><th>Last</th><th>Score</th><th>Bars</th><th>State</th></tr></thead><tbody></tbody></table></div>
+</section>
+<section id="t-trades">
+  <div class="card"><h2>Paper account</h2><div id="acct" class="kv"></div>
+    <div class="row" style="margin-top:8px"><button class="b warn" id="btnReset">↺ Reset paper (tap twice)</button></div></div>
+  <div class="card"><h2>Open positions</h2><table id="open"><thead><tr><th>Stock</th><th>Side</th><th>Qty</th><th>Entry</th><th>Stop</th><th>P&amp;L</th></tr></thead><tbody></tbody></table></div>
+  <div class="card"><h2>Closed trades (net of Indian charges)</h2><table id="closed"><thead><tr><th>Stock</th><th>Side</th><th>Exit</th><th>Charges</th><th>Net</th></tr></thead><tbody></tbody></table></div>
+  <div class="card"><h2>Bot log</h2><div id="log" class="log"></div></div>
+</section>
+<section id="t-results">
+  <div class="card"><h2>Real-data backtest (21 Nov 2026)</h2>
+  <p class="note">Every setting was copied from the crypto bot and fixed before testing. Real NSE/BSE prices, full Indian charges (brokerage, STT, exchange, SEBI, stamp, GST) and slippage. R = the amount risked per trade.</p>
+  <table><thead><tr><th>Version</th><th>Trades</th><th>Net R</th><th>PF</th><th>Pass</th></tr></thead><tbody>
+  <tr><td>Breakout daily · index futures</td><td>593</td><td class="up">+0.013</td><td>1.02</td><td>3/10</td></tr>
+  <tr><td>Breakout daily · stock futures</td><td>9,213</td><td class="dn">−0.001</td><td>1.00</td><td>1/10</td></tr>
+  <tr><td>Breakout daily · delivery long</td><td>5,865</td><td class="up">+0.034</td><td>1.06</td><td>4/10</td></tr>
+  <tr><td>Breakout 60-min · index fut</td><td>560</td><td class="dn">−0.298</td><td>0.64</td><td>1/10</td></tr>
+  <tr><td>Breakout 60-min · stock fut</td><td>5,981</td><td class="dn">−0.113</td><td>0.85</td><td>2/10</td></tr>
+  <tr><td>Breakout 60-min · delivery</td><td>3,022</td><td class="dn">−0.121</td><td>0.86</td><td>2/10</td></tr>
+  <tr><td>360° Scanner 5-min · intraday</td><td>2,248</td><td class="dn">−0.282</td><td>0.35</td><td>1/10</td></tr>
+  </tbody></table>
+  <p class="note"><b>Verdict: no version passes.</b> The scanner's average move (+0.019%) is far smaller than intraday costs (0.142%). The daily breakout is close to break-even and turns negative with one-day-late entries or doubled costs. Live trading stays locked.</p></div>
+  <div class="card"><h2>Dhan Cloud version</h2><p class="note">The full bot (both engines, NSE + BSE, cash + F&amp;O, Super Orders with trailing stop) runs on Dhan Cloud as Python. Paste <a href="dhan_cloud/main.py" style="color:var(--ac)">main.py</a> and <a href="dhan_cloud/requirements.txt" style="color:var(--ac)">requirements.txt</a> into cloud.dhanhq.co/editor and schedule weekdays 09:10–15:35 IST. It is paper-only too.</p></div>
+</section>
+<section id="t-set">
+  <div class="card"><h2>Connect to Dhan (live prices)</h2>
+    <p class="note">Prices come from Dhan's live market feed over WebSocket. Your access token is kept <b>only in this tab's memory</b>: it is never saved on the phone or sent anywhere except Dhan. Get it from web.dhan.co → My Profile → DhanHQ Trading APIs (valid 24 hours). The Data API subscription must be active.</p>
+    <label>Dhan Client ID</label><input id="cid" inputmode="numeric" autocomplete="off">
+    <label>Access token</label><input id="tok" type="password" autocomplete="off">
+    <div class="row" style="margin-top:8px"><button class="b pri" id="btnConn">Connect</button><button class="b" id="btnDemo">Demo (simulated)</button></div>
+    <p class="note" id="connnote"></p></div>
+  <div class="card"><h2>Paper settings</h2>
+    <label>Paper capital (₹)</label><input id="capital" inputmode="numeric">
+    <label>Risk per trade (%)</label><input id="risk" inputmode="decimal">
+    <label>Cash exchange for stocks</label><select id="exch"><option>NSE</option><option>BSE</option></select>
+    <label>Max open positions</label><input id="maxopen" inputmode="numeric">
+    <div class="row" style="margin-top:8px"><button class="b" id="btnSave">Save settings</button></div>
+    <p class="note">Daily loss stop 3% and kill switch 20% are fixed. Intraday positions close at 15:15 IST.</p></div>
+  <div class="card"><h2>About</h2><p class="note">India Bot in1.0 · port of the CX crypto bot (v7) to NSE and BSE. Paper trading only: this app contains no order code. Install: Chrome menu → Install app (Android), or Share → Add to Home Screen (iPhone).</p></div>
+</section>
+</main>
+<nav><button data-t="market" class="on">Market</button><button data-t="scan">Scanner</button><button data-t="trades">Trades</button><button data-t="results">Results</button><button data-t="set">Settings</button></nav>
+<script>
+"use strict";
+(function(){
+const VERSION="in1.0";
+/* ---------------- instruments ----------------
+   Security IDs are looked up in Dhan's public scrip master (images.dhan.co, allowed from the browser) the first time you connect,
+   then kept on the phone for 7 days. The fallback IDs below are NSE token numbers as remembered when this was built; they are
+   marked "unverified" in the app until the scrip master confirms them. */
+const NAMES=["RELIANCE","HDFCBANK","ICICIBANK","INFY","TCS","BHARTIARTL","ITC","LT","SBIN","AXISBANK","KOTAKBANK","HINDUNILVR","BAJFINANCE","M&M","MARUTI",
+ "SUNPHARMA","HCLTECH","NTPC","TITAN","ULTRACEMCO","POWERGRID","ASIANPAINT","ONGC","TATASTEEL","ADANIENT","ADANIPORTS","COALINDIA","BAJAJFINSV","JSWSTEEL","WIPRO",
+ "TECHM","HINDALCO","CIPLA","DRREDDY","EICHERMOT","BEL","TRENT","HEROMOTOCO","APOLLOHOSP","BPCL","TATAPOWER","DLF","HAL","BANKBARODA","VEDL","TVSMOTOR","INDIGO","PFC","RECLTD","GAIL"];
+const NSE_FALLBACK={RELIANCE:2885,HDFCBANK:1333,ICICIBANK:4963,INFY:1594,TCS:11536,BHARTIARTL:10604,ITC:1660,LT:11483,SBIN:3045,AXISBANK:5900,KOTAKBANK:1922,HINDUNILVR:1394,
+ BAJFINANCE:317,"M&M":2031,MARUTI:10999,SUNPHARMA:3351,HCLTECH:7229,NTPC:11630,TITAN:3506,ULTRACEMCO:11532,POWERGRID:14977,ASIANPAINT:236,ONGC:2475,TATASTEEL:3499,
+ ADANIENT:25,ADANIPORTS:15083,COALINDIA:20374,BAJAJFINSV:16675,JSWSTEEL:11723,WIPRO:3787,TECHM:13538,HINDALCO:1363,CIPLA:694,DRREDDY:881,EICHERMOT:910,BEL:383,
+ TRENT:1964,HEROMOTOCO:1348,APOLLOHOSP:157,BPCL:526,TATAPOWER:3426,DLF:14732,HAL:2303,BANKBARODA:4668,VEDL:3063,TVSMOTOR:8479,INDIGO:11195,PFC:14299,RECLTD:15355,GAIL:4717};
+const IDX_DEF=[["NIFTY","NSE",13,["NIFTY","NIFTY 50"]],["BANKNIFTY","NSE",25,["BANKNIFTY","NIFTY BANK"]],["SENSEX","BSE",51,["SENSEX"]],["FINNIFTY","NSE",27,["FINNIFTY","NIFTY FIN SERVICE"]],
+ ["MIDCPNIFTY","NSE",442,["MIDCPNIFTY","NIFTY MID SELECT"]],["BANKEX","BSE",69,["BANKEX"]]];
+/* stored map "inb:imap" = {t: saved time, eq:{"NSE:SYM":id,"BSE:SYM":id}, idx:{SYM:id}} */
+let VERIFIED=false;const INDICES=[],STOCKS=[],INST={};
+function buildInst(){const M=LS0("imap",null);VERIFIED=!!(M&&Date.now()-M.t<7*864e5);INDICES.length=0;STOCKS.length=0;
+  IDX_DEF.forEach(([sym,exch,fb])=>INDICES.push({sym,exch,seg:"IDX_I",id:String(VERIFIED&&M.idx[sym]||fb)}));
+  const ex=(LS0("cfg",{}).exch)||"NSE";
+  NAMES.forEach(sym=>{const id=VERIFIED?M.eq[ex+":"+sym]:(ex==="NSE"?NSE_FALLBACK[sym]:null);if(id)STOCKS.push({sym,exch:ex,seg:ex+"_EQ",id:String(id)});});
+  Object.keys(INST).forEach(k=>delete INST[k]);[...INDICES,...STOCKS].forEach(x=>{INST[x.seg+":"+x.id]=x;});
+  const v=document.getElementById("ver");if(v)v.textContent="in1.0 · "+STOCKS.length+" "+ex+" stocks"+(VERIFIED?"":" · IDs unverified");}
+buildInst();
+function LS0(k,d){try{const v=localStorage.getItem("inb:"+k);return v==null?d:JSON.parse(v);}catch(e){return d;}}
+async function resolveIds(){note("Looking up security IDs in Dhan's scrip master (about 30 MB, once a week)…");
+  const r=await fetch("https://images.dhan.co/api-data/api-scrip-master.csv");if(!r.ok)throw new Error("scrip master HTTP "+r.status);
+  const t=await r.text();const lines=t.split("\n");const H=lines[0].split(",").map(x=>x.trim());const c=n=>H.indexOf(n);
+  const EX=c("SEM_EXM_EXCH_ID"),SID=c("SEM_SMST_SECURITY_ID"),INS=c("SEM_INSTRUMENT_NAME"),SYM=c("SEM_TRADING_SYMBOL"),SER=c("SEM_SERIES");
+  if(EX<0||SID<0||INS<0||SYM<0)throw new Error("scrip master columns changed: "+H.slice(0,10).join(","));
+  const want=new Set(NAMES),eq={},idx={};const alias={};IDX_DEF.forEach(([s,,,a])=>a.forEach(x=>alias[x.toUpperCase()]=s));
+  for(let i=1;i<lines.length;i++){const f=lines[i].split(",");if(f.length<5)continue;const ins=f[INS],sym=(f[SYM]||"").trim();
+    if(ins==="EQUITY"&&want.has(sym)&&(f[EX]==="NSE"||f[EX]==="BSE")){if(f[EX]==="NSE"&&SER>=0&&f[SER]&&f[SER].trim()!=="EQ")continue;const k=f[EX]+":"+sym;if(!eq[k])eq[k]=f[SID];}
+    else if(ins==="INDEX"&&alias[sym.toUpperCase()]&&!idx[alias[sym.toUpperCase()]])idx[alias[sym.toUpperCase()]]=f[SID];}
+  LS.set("imap",{t:Date.now(),eq,idx});return Object.keys(eq).length+" stock IDs and "+Object.keys(idx).length+" index IDs";}
+/* ---------------- settings & storage (no secrets are ever stored) ---------------- */
+const LS={get:(k,d)=>{try{const v=localStorage.getItem("inb:"+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set:(k,v)=>{try{localStorage.setItem("inb:"+k,JSON.stringify(v));}catch(e){}}};
+const cfg=Object.assign({capital:100000,risk:0.5,exch:"NSE",maxopen:3,cid:""},LS.get("cfg",{}));
+const S={scanMin:60,look:3,atrN:14,atrK:2,minStopPct:0.3,maxStopPct:3,lockMult:2,lockBuf:0.02,giveBack:40,fadeEma:9,timeStop:30,maxHold:120,cooldown:10,maxPerDay:4,chaseZ:2.5,edgeMult:2,moodBrHi:60,moodBrLo:40,volPause:3,wMom:30,wVol:15,wBrk:20,tf:5,start:585,cutoff:885,exitBy:915};
+/* ---------------- Indian charges (Dhan, Nov 2026): equity intraday ---------------- */
+function charges(buy,sell,exch){const brok=Math.min(20,0.0003*buy)+Math.min(20,0.0003*sell),stt=0.00025*sell,ex=(exch==="BSE"?0.0000375:0.0000297)*(buy+sell),stamp=0.00003*buy,sebi=1e-6*(buy+sell),gst=0.18*(brok+ex+sebi);
+  return {brok,stt,ex,stamp,sebi,gst,total:brok+stt+ex+stamp+sebi+gst};}
+const SLIP=0.0003,COSTPCT=(charges(1e5,1e5,"NSE").total/1e5+2*SLIP)*100;
+/* ---------------- time (IST) ---------------- */
+const istNow=()=>new Date(Date.now()+330*60000);
+const istMin=d=>d.getUTCHours()*60+d.getUTCMinutes();
+const istDay=d=>d.toISOString().slice(0,10);
+const isTradingDay=d=>{const w=d.getUTCDay();return w>0&&w<6;};
+/* ---------------- bars: 5-minute OHLCV per instrument, built from the live feed ---------------- */
+const key=(seg,id)=>seg+":"+id;
+let bars=LS.get("bars",{}),feed={};  /* bars[k] = [{t (IST minute index of day*1e4+min), o,h,l,c,v}] ; feed[k] = {ltp,cum,buyQ,sellQ,open,close,high,low} */
+function pruneBars(){const today=istDay(istNow());Object.keys(bars).forEach(k=>{bars[k]=bars[k].filter(b=>b.d>=prevTradingDay(today));});}
+function prevTradingDay(day){const d=new Date(day+"T00:00:00Z");do{d.setUTCDate(d.getUTCDate()-1);}while(!isTradingDay(d));return d.toISOString().slice(0,10);}
+function onTick(k,px,cum){const n=istNow(),m=istMin(n);if(m<555||m>=930||!isTradingDay(n))return;const d=istDay(n),slot=m-(m-555)%5;
+  const L=bars[k]||(bars[k]=[]);let b=L[L.length-1];
+  if(!b||b.d!==d||b.s!==slot){b={d,s:slot,o:px,h:px,l:px,c:px,v:0,cv0:cum};L.push(b);if(L.length>200)L.splice(0,L.length-200);}
+  b.h=Math.max(b.h,px);b.l=Math.min(b.l,px);b.c=px;if(cum!=null&&b.cv0!=null)b.v=Math.max(0,cum-b.cv0);}
+const completed=(k,n)=>{const L=bars[k]||[];const d=istDay(n),m=istMin(n);return L.filter(b=>b.d<d||b.s+5<=m);};
+/* ---------------- engine (same formulas as main.py / bt_india.py) ---------------- */
+function feat(L){const n=L.length;if(n<25)return null;const i=n-1,k=S.look,c=L[i].c;
+  const lr=[];for(let j=Math.max(1,n-59);j<n;j++)lr.push(Math.log(L[j].c/L[j-1].c));if(lr.length<20)return null;
+  const mu=lr.reduce((a,x)=>a+x,0)/lr.length,sd=Math.sqrt(lr.reduce((a,x)=>a+(x-mu)**2,0)/(lr.length-1));if(!(sd>0))return null;
+  const ret=Math.log(c/L[i-k].c),z=ret/(sd*Math.sqrt(k));
+  let vr=0;for(let j=i-k+1;j<=i;j++)vr+=L[j].v;vr/=k;let vb=0,nb=0;for(let j=Math.max(0,i-60);j<=i-k;j++){vb+=L[j].v;nb++;}vb=nb>=10?vb/nb:0;const rv=vb>0?vr/vb:null;
+  let hi=-1e18,lo=1e18;for(let j=Math.max(0,i-60);j<i;j++){hi=Math.max(hi,L[j].h);lo=Math.min(lo,L[j].l);}
+  let tr=0,nt=0;for(let j=Math.max(1,n-(S.atrN-1));j<n;j++){tr+=Math.max(L[j].h,L[j-1].c)-Math.min(L[j].l,L[j-1].c);nt++;}const atr=tr/nt;
+  const a=2/(S.fadeEma+1);let ema=L[0].c;for(let j=1;j<n;j++)ema+=a*(L[j].c-ema);
+  const day=L[i].d;let pv=0,vv=0,ts=0,tn=0;for(const b of L){if(b.d!==day)continue;const tp=(b.h+b.l+b.c)/3;pv+=tp*b.v;vv+=b.v;ts+=tp;tn++;}const vw=vv>0?pv/vv:(tn?ts/tn:null);
+  const brk=c>hi&&c>vw?1:c<lo&&c<vw?-1:c>vw?0.3:c<vw?-0.3:0,mom=Math.max(-1,Math.min(1,z/3)),vol=rv==null?null:Math.sign(ret)*Math.max(0,Math.min(1,(rv-1)/2));
+  const score=100*(S.wMom*mom+(vol==null?0:S.wVol*vol)+S.wBrk*brk)/(S.wMom+(vol==null?0:S.wVol)+S.wBrk);
+  return {c,sd,mom,vol,brk,atr,ema,vw,score};}
+function mood(n){const ix=INDICES.find(x=>x.sym==="NIFTY");if(!ix)return {bias:null,why:"no Nifty"};const L=completed(key(ix.seg,ix.id),n);if(L.length<13)return {bias:null,why:"needs 13+ Nifty 5-min bars"};
+  const c=L[L.length-1].c,day=L[L.length-1].d,T=L.filter(b=>b.d===day);const vw=T.reduce((a,b)=>a+(b.h+b.l+b.c)/3,0)/T.length;
+  const tV=Math.sign(c-vw),tR=Math.sign(c-L[L.length-13].c);let up=0,dn=0;
+  STOCKS.forEach(s=>{const f=lastFeat[key(s.seg,s.id)];if(!f||f.vw==null)return;if(f.c>f.vw)up++;else if(f.c<f.vw)dn++;});
+  const br=up+dn?up/(up+dn)*100:null,tB=br==null?0:br>=S.moodBrHi?1:br<=S.moodBrLo?-1:0;
+  const rng5=j=>{let h=-1e18,l=1e18;for(let x=Math.max(0,j-4);x<=j;x++){h=Math.max(h,L[x].h);l=Math.min(l,L[x].l);}return h-l;};
+  const hs=[];for(let j=L.length-6;j>=4&&hs.length<12;j-=5)hs.push(rng5(j));hs.sort((a,b)=>a-b);const med=hs.length?hs[hs.length>>1]:null,spike=med>0?rng5(L.length-1)/med:null;
+  return {bias:tV+tR+tB,tV,tR,tB,br,spike,pause:spike!=null&&spike>S.volPause,c,vw};}
+function gates(f,d){if(f.vw>0&&f.sd>0){const zc=Math.log(f.c/f.vw)*d/(f.sd*Math.sqrt(60/S.tf));if(zc>S.chaseZ)return "chasing ("+zc.toFixed(1)+"σ beyond VWAP)";}
+  const exp=f.atr/f.c*100*Math.sqrt(Math.max(1,S.timeStop/S.tf));if(exp<S.edgeMult*COSTPCT)return "expected move "+exp.toFixed(3)+"% < "+S.edgeMult+"× charges";return null;}
+function step(s,b){const d=s.d;if(d>0?b.l<=s.stop:b.h>=s.stop)return [d>0?Math.min(b.o,s.stop):Math.max(b.o,s.stop),s.trailed?"trail":s.locked?"lock":"stop"];
+  s.peak=d>0?Math.max(s.peak,b.h):Math.min(s.peak,b.l);s.n++;const fav=(s.peak/s.entry-1)*d*100;
+  if(!s.locked&&fav>=S.lockMult*COSTPCT){s.locked=true;const lv=s.entry*(1+d*(COSTPCT+S.lockBuf)/100);if(d>0?lv>s.stop:lv<s.stop)s.stop=lv;}
+  if(s.locked){const t=s.peak-d*Math.abs(s.peak-s.entry)*S.giveBack/100;if(d>0?t>s.stop:t<s.stop){s.stop=t;s.trailed=true;}}
+  s.ema+=2/(S.fadeEma+1)*(b.c-s.ema);if(s.locked&&s.n>=2&&(d>0?b.c<s.ema:b.c>s.ema))return [b.c,"fade"];
+  const held=s.n*S.tf;if(!s.locked&&held>=S.timeStop)return [b.c,"time"];if(held>=S.maxHold)return [b.c,"maxhold"];return null;}
+/* ---------------- paper account ---------------- */
+let acct=LS.get("acct",null);if(!acct)acct={eq:cfg.capital,peak:cfg.capital,day:"",dayPnl:0,open:{},closed:[],cnt:{},last:{},halt:""};
+function saveAcct(){LS.set("acct",acct);}
+const logs=[];function log(m){const t=istNow().toISOString().slice(11,19);logs.unshift(t+"  "+m);if(logs.length>300)logs.pop();const el=document.getElementById("log");if(el)el.textContent=logs.join("\n");}
+function closePos(k,px,why){const p=acct.open[k];if(!p)return;const exit=px*(1-p.d*SLIP);const bv=(p.d>0?p.fill:exit)*p.qty,sv=(p.d>0?exit:p.fill)*p.qty,ch=charges(bv,sv,p.exch).total;
+  const net=p.d*(exit-p.fill)*p.qty-ch;acct.eq+=net;acct.dayPnl+=net;acct.peak=Math.max(acct.peak,acct.eq);delete acct.open[k];
+  acct.closed.unshift({sym:p.sym,d:p.d,qty:p.qty,entry:p.fill,exit,why,ch,net,t:istNow().toISOString().slice(0,16)});if(acct.closed.length>200)acct.closed.pop();
+  log("PAPER EXIT "+p.sym+" "+(p.d>0?"LONG":"SHORT")+" @ "+exit.toFixed(2)+" ("+why+") net ₹"+net.toFixed(2)+" after charges ₹"+ch.toFixed(2));
+  if(acct.eq<acct.peak*0.8)acct.halt="kill switch (−20% from peak)";else if(acct.dayPnl<-cfg.capital*0.03)acct.halt="daily loss limit (3%)";saveAcct();}
+/* ---------------- decision loop: runs at each 5-minute bar close ---------------- */
+let running=false,lastSlot=null,lastFeat={},source="";
+function decide(){const n=istNow(),m=istMin(n),d=istDay(n);if(acct.day!==d){acct.day=d;acct.dayPnl=0;acct.cnt={};if(acct.halt&&!acct.halt.startsWith("kill"))acct.halt="";saveAcct();}
+  STOCKS.forEach(s=>{const k=key(s.seg,s.id);const L=completed(k,n);lastFeat[k]=L.length?feat(L):null;});
+  /* manage open positions on the newest completed bar */
+  Object.keys(acct.open).forEach(k=>{const p=acct.open[k],L=completed(k,n),b=L[L.length-1];if(!b)return;if(p.lastBar===b.d+b.s)return;p.lastBar=b.d+b.s;
+    const r=step(p.st,b);p.stop=p.st.stop;if(r)closePos(k,r[0],r[1]);else if(m>=S.exitBy)closePos(k,b.c,"15:15 square-off");});
+  if(!running||acct.halt||m<S.start||m>S.cutoff)return;
+  const md=mood(n);const ranked=STOCKS.map(s=>[s,lastFeat[key(s.seg,s.id)]]).filter(x=>x[1]).sort((a,b)=>Math.abs(b[1].score)-Math.abs(a[1].score));
+  for(const [s,f] of ranked){const k=key(s.seg,s.id);if(Object.keys(acct.open).length>=cfg.maxopen)break;const dir=f.score>=S.scanMin?1:f.score<=-S.scanMin?-1:0;if(!dir||acct.open[k])continue;
+    if(acct.last[k]&&acct.last[k].d===d&&m-acct.last[k].m<S.cooldown)continue;acct.last[k]={d,m};
+    let why=md.bias==null?"mood unavailable ("+md.why+")":md.pause?"Nifty volatility spike":!(dir>0?md.bias>=1:md.bias<=-1)?"mood "+(md.bias>0?"+":"")+md.bias+" does not allow "+(dir>0?"longs":"shorts"):null;
+    why=why||gates(f,dir);if(!why&&(acct.cnt[k]||0)>=S.maxPerDay)why="4 trades in this stock today";
+    if(why){log("blocked "+s.sym+" "+(dir>0?"long":"short")+" score "+f.score.toFixed(0)+": "+why);continue;}
+    const R=Math.min(Math.max(S.atrK*f.atr,f.c*S.minStopPct/100),f.c*S.maxStopPct/100),stop=f.c-dir*R;
+    let qty=Math.floor(acct.eq*cfg.risk/100/R);qty=Math.min(qty,Math.floor(acct.eq*5/f.c));if(qty<1)continue;
+    const fd=feed[k],fill=(fd&&fd.ltp?fd.ltp:f.c)*(1+dir*SLIP);acct.cnt[k]=(acct.cnt[k]||0)+1;
+    acct.open[k]={sym:s.sym,exch:s.exch,d:dir,qty,fill,stop,st:{d:dir,entry:fill,stop,peak:fill,locked:false,trailed:false,ema:f.ema,n:0},t:n.toISOString().slice(11,16)};
+    log("PAPER ENTRY 360 "+s.sym+" "+(dir>0?"LONG":"SHORT")+" qty "+qty+" @ "+fill.toFixed(2)+" stop "+stop.toFixed(2)+" score "+f.score.toFixed(0)+" mood "+md.bias);}
+  saveAcct();}
+function tickStops(){Object.keys(acct.open).forEach(k=>{const p=acct.open[k],f=feed[k];if(!f||!f.ltp)return;if(p.d>0?f.ltp<=p.stop:f.ltp>=p.stop)closePos(k,f.ltp,p.st.trailed?"trail":p.st.locked?"lock":"stop");});}
+/* ---------------- Dhan live market feed (WebSocket, binary, little-endian) ---------------- */
+let ws=null,token=null,demoT=null;
+const SEGN={0:"IDX_I",1:"NSE_EQ",2:"NSE_FNO",3:"NSE_CURRENCY",4:"BSE_EQ",5:"MCX_COMM",7:"BSE_CURRENCY",8:"BSE_FNO"};
+function parse(buf){const dv=new DataView(buf);let o=0;while(o+8<=buf.byteLength){const code=dv.getUint8(o),len=dv.getUint16(o+1,true)||buf.byteLength-o,seg=SEGN[dv.getUint8(o+3)],id=String(dv.getInt32(o+4,true));const k=key(seg,id),f=feed[k]||(feed[k]={});
+    if(code===2&&o+16<=buf.byteLength){f.ltp=dv.getFloat32(o+8,true);onTick(k,f.ltp,null);}
+    else if((code===4||code===8)&&o+50<=buf.byteLength){f.ltp=dv.getFloat32(o+8,true);f.cum=dv.getInt32(o+22,true);f.sellQ=dv.getInt32(o+26,true);f.buyQ=dv.getInt32(o+30,true);f.open=dv.getFloat32(o+34,true);f.close=dv.getFloat32(o+38,true);f.high=dv.getFloat32(o+42,true);f.low=dv.getFloat32(o+46,true);onTick(k,f.ltp,f.cum);}
+    else if(code===6&&o+12<=buf.byteLength){f.prev=dv.getFloat32(o+8,true);}
+    else if(code===50){log("Dhan closed the feed (code "+dv.getInt16(o+8,true)+")");}
+    o+=len>0?len:buf.byteLength;}}
+async function connect(){const cid=document.getElementById("cid").value.trim(),tk=document.getElementById("tok").value.trim();if(!cid||!tk){note("Enter your Client ID and access token.");return;}
+  cfg.cid=cid;LS.set("cfg",cfg);token=tk;document.getElementById("tok").value="";stopDemo();
+  if(!VERIFIED){try{const msg=await resolveIds();buildInst();log("scrip master: "+msg);}catch(e){log("scrip master failed: "+e.message+"; using unverified built-in NSE IDs");}}
+  openWs(cid);}
+function openWs(cid){if(ws)try{ws.close();}catch(e){}source="Dhan live";setConn("connecting…","");
+  ws=new WebSocket("wss://api-feed.dhan.co?version=2&token="+encodeURIComponent(token)+"&clientId="+encodeURIComponent(cid)+"&authType=2");ws.binaryType="arraybuffer";
+  ws.onopen=()=>{setConn("Dhan feed connected","ok");note("Connected. Subscribing to "+(INDICES.length+STOCKS.length)+" instruments.");const all=[...INDICES,...STOCKS].map(x=>({ExchangeSegment:x.seg,SecurityId:String(x.id)}));
+    for(let i=0;i<all.length;i+=100){const part=all.slice(i,i+100);ws.send(JSON.stringify({RequestCode:17,InstrumentCount:part.length,InstrumentList:part}));}log("subscribed "+all.length+" instruments (quote mode)");};
+  ws.onmessage=e=>{if(e.data instanceof ArrayBuffer)parse(e.data);};
+  ws.onerror=()=>setConn("feed error","bad");
+  ws.onclose=e=>{setConn("feed closed ("+e.code+")","bad");note("The feed closed. Common causes: expired token (they last 24 hours), Data API not subscribed, or too many connections. Tap Connect again with a fresh token.");};}
+function startDemo(){if(ws)try{ws.close();}catch(e){}source="SIMULATED demo";setConn("SIMULATED prices","bad");note("Demo mode: random prices generated on the phone, for trying the screens only. Not market data.");
+  const px={};[...INDICES,...STOCKS].forEach(x=>{px[key(x.seg,x.id)]={p:x.ref||1000,cum:0};});
+  demoT=setInterval(()=>{Object.entries(px).forEach(([k,s])=>{s.p*=Math.exp((Math.random()-0.5)*0.0016);s.cum+=Math.floor(Math.random()*500);const f=feed[k]||(feed[k]={});f.ltp=s.p;f.cum=s.cum;f.prev=f.prev||s.p;onTick(k,s.p,s.cum);});},1000);}
+function stopDemo(){if(demoT){clearInterval(demoT);demoT=null;}}
+/* ---------------- UI ---------------- */
+const $=id=>document.getElementById(id);const fmt=(x,d=2)=>x==null||!isFinite(x)?"–":Number(x).toLocaleString("en-IN",{minimumFractionDigits:d,maximumFractionDigits:d});
+function note(t){$("connnote").textContent=t;}function setConn(t,c){$("conn").textContent=t;$("conn").className="badge "+c;}
+function render(){const n=istNow(),m=istMin(n);$("clock").textContent=n.toISOString().slice(11,19)+" IST";
+  const open=isTradingDay(n)&&m>=555&&m<930;$("mkt").textContent=open?"market open":"market closed";$("mkt").className="badge "+(open?"ok":"");
+  $("strip").innerHTML=INDICES.slice(0,3).map(x=>{const f=feed[key(x.seg,x.id)]||{};const ch=f.ltp&&(f.prev||f.close)?(f.ltp/(f.prev||f.close)-1)*100:null;return '<div class="cell"><small>'+x.sym+'</small><b>'+fmt(f.ltp)+'</b><small class="'+(ch>=0?"up":"dn")+'">'+(ch==null?"–":(ch>=0?"+":"")+ch.toFixed(2)+"%")+'</small></div>';}).join("");
+  $("idx").tBodies[0].innerHTML=INDICES.map(x=>{const k=key(x.seg,x.id),f=feed[k]||{};const ch=f.ltp&&(f.prev||f.close)?(f.ltp/(f.prev||f.close)-1)*100:null;return "<tr><td>"+x.sym+" <span class=mu>"+x.exch+"</span></td><td>"+fmt(f.ltp)+'</td><td class="'+(ch>=0?"up":"dn")+'">'+(ch==null?"–":ch.toFixed(2)+"%")+"</td><td>"+completed(k,n).length+"</td></tr>";}).join("");
+  const md=mood(n);$("mood").innerHTML=md.bias==null?"<span>Mood</span><span class=mu>"+md.why+"</span>":
+    "<span>Nifty vs session VWAP</span><span class="+(md.tV>0?"up":"dn")+">"+(md.tV>0?"above":"below")+" "+fmt(md.vw)+"</span><span>Nifty last 60 min</span><span class="+(md.tR>0?"up":"dn")+">"+(md.tR>0?"up":"down")+"</span><span>Breadth (stocks above VWAP)</span><span>"+(md.br==null?"–":md.br.toFixed(0)+"%")+"</span><span>Volatility vs normal</span><span>"+(md.spike==null?"–":md.spike.toFixed(1)+"×"+(md.pause?" pause":""))+"</span><span><b>Mood score</b></span><span><b class="+(md.bias>0?"up":md.bias<0?"dn":"mu")+">"+(md.bias>0?"+":"")+md.bias+(md.bias>=1?" longs allowed":md.bias<=-1?" shorts allowed":" no trades")+"</b></span>";
+  $("board").tBodies[0].innerHTML=STOCKS.map(s=>{const k=key(s.seg,s.id);return [s,k,lastFeat[k],feed[k]||{}];}).sort((a,b)=>Math.abs((b[2]||{}).score||0)-Math.abs((a[2]||{}).score||0)).slice(0,40).map(([s,k,f,fd])=>{const sc=f?f.score:null;
+    return "<tr><td>"+s.sym+"</td><td>"+fmt(fd.ltp)+'</td><td class="'+(sc>=S.scanMin?"up":sc<=-S.scanMin?"dn":"mu")+'">'+(sc==null?"warming":(sc>0?"+":"")+sc.toFixed(0))+"</td><td>"+completed(k,n).length+"</td><td>"+(acct.open[k]?"OPEN":"")+"</td></tr>";}).join("");
+  $("scanstate").textContent=running?(acct.halt?"halted: "+acct.halt:"running · "+source):"stopped";$("scanstate").className="badge "+(running&&!acct.halt?"ok":"");
+  let unreal=0;$("open").tBodies[0].innerHTML=Object.entries(acct.open).map(([k,p])=>{const f=feed[k]||{};const u=f.ltp?p.d*(f.ltp-p.fill)*p.qty:null;if(u!=null)unreal+=u;return "<tr><td>"+p.sym+"</td><td>"+(p.d>0?"LONG":"SHORT")+"</td><td>"+p.qty+"</td><td>"+fmt(p.fill)+"</td><td>"+fmt(p.stop)+'</td><td class="'+(u>=0?"up":"dn")+'">'+fmt(u)+"</td></tr>";}).join("")||"<tr><td colspan=6 class=mu>none</td></tr>";
+  $("closed").tBodies[0].innerHTML=acct.closed.slice(0,50).map(c=>"<tr><td>"+c.sym+"</td><td>"+(c.d>0?"L":"S")+" "+c.why+"</td><td>"+fmt(c.exit)+"</td><td>"+fmt(c.ch)+'</td><td class="'+(c.net>=0?"up":"dn")+'">'+fmt(c.net)+"</td></tr>").join("")||"<tr><td colspan=5 class=mu>none yet</td></tr>";
+  const w=acct.closed.filter(c=>c.net>0).length,tot=acct.closed.reduce((a,c)=>a+c.net,0),chs=acct.closed.reduce((a,c)=>a+c.ch,0);
+  $("acct").innerHTML="<span>Equity (closed trades)</span><span>₹"+fmt(acct.eq)+"</span><span>Open P&amp;L (before charges)</span><span class="+(unreal>=0?"up":"dn")+">₹"+fmt(unreal)+"</span><span>Today net</span><span class="+(acct.dayPnl>=0?"up":"dn")+">₹"+fmt(acct.dayPnl)+"</span><span>All trades net</span><span class="+(tot>=0?"up":"dn")+">₹"+fmt(tot)+"</span><span>Charges paid</span><span>₹"+fmt(chs)+"</span><span>Trades · win rate</span><span>"+acct.closed.length+" · "+(acct.closed.length?(w/acct.closed.length*100).toFixed(0)+"%":"–")+"</span><span>Round-trip cost used</span><span>"+COSTPCT.toFixed(3)+"%</span>"+(acct.halt?"<span class=dn>Halted</span><span class=dn>"+acct.halt+"</span>":"");}
+function loop(){const n=istNow(),m=istMin(n),slot=istDay(n)+":"+(m-(m-555)%5);tickStops();
+  if(slot!==lastSlot&&n.getUTCSeconds()>=2){lastSlot=slot;pruneBars();decide();LS.set("bars",bars);}render();}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));document.querySelectorAll("section").forEach(s=>s.classList.toggle("on",s.id==="t-"+b.dataset.t));});
+$("btnConn").onclick=connect;$("btnDemo").onclick=startDemo;
+$("btnRun").onclick=()=>{running=true;log("paper bot started ("+(source||"no feed yet")+")");if(navigator.wakeLock)navigator.wakeLock.request("screen").catch(()=>{});};
+$("btnStop").onclick=()=>{running=false;log("paper bot stopped (open positions still tracked)");};
+let resetArm=0;$("btnReset").onclick=()=>{if(Date.now()-resetArm<3000){acct={eq:cfg.capital,peak:cfg.capital,day:"",dayPnl:0,open:{},closed:[],cnt:{},last:{},halt:""};saveAcct();log("paper account reset");resetArm=0;$("btnReset").textContent="↺ Reset paper (tap twice)";}else{resetArm=Date.now();$("btnReset").textContent="Tap again to reset";}};
+$("cid").value=cfg.cid||"";$("capital").value=cfg.capital;$("risk").value=cfg.risk;$("exch").value=cfg.exch;$("maxopen").value=cfg.maxopen;
+$("btnSave").onclick=()=>{cfg.capital=Math.max(1000,+$("capital").value||100000);cfg.risk=Math.min(2,Math.max(0.1,+$("risk").value||0.5));cfg.exch=$("exch").value;cfg.maxopen=Math.min(5,Math.max(1,+$("maxopen").value||3));LS.set("cfg",cfg);log("settings saved (exchange change applies after reload)");if(cfg.exch!==STOCKS_EXCH)setTimeout(()=>location.reload(),300);};
+const STOCKS_EXCH=cfg.exch;
+pruneBars();setInterval(loop,1000);loop();
+if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
+window.__inb={lf:()=>lastFeat,cfg,S,acct:()=>acct,bars:()=>bars,feed,parse,onTick,feat,mood,decide,charges,COSTPCT,istNow,setRun:v=>{running=v;},INDICES,STOCKS,completed};
+})();
+</script>
+</body>
+</html>

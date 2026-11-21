@@ -1,0 +1,67 @@
+{
+ "when": "2026-11-21T06:39:32.696Z",
+ "pass": 12,
+ "total": 12,
+ "results": [
+  [
+   "T1 loads without errors, shows PAPER badge",
+   true,
+   ""
+  ],
+  [
+   "T2 no order code in the page",
+   true,
+   ""
+  ],
+  [
+   "T3 connects to Dhan v2 feed URL with authType=2",
+   true,
+   "wss://api-feed.dhan.co?version=2&token=TEST-TOKEN-XYZ&clientId=1100000001&authType=2"
+  ],
+  [
+   "T4 subscribes in quote mode (RequestCode 17), <=100 per message",
+   true,
+   "{\"RequestCode\":17,\"InstrumentCount\":12,\"InstrumentList\":[{\"ExchangeSegment\":\"IDX_I\",\"SecurityId\":\"13\"},{\"ExchangeSegment"
+  ],
+  [
+   "T5 scrip master resolved IDs (uses 9000-series from mock)",
+   true,
+   ""
+  ],
+  [
+   "T6 token not stored anywhere",
+   true,
+   ""
+  ],
+  [
+   "T7 builds 5-minute bars from the feed",
+   true,
+   "max bars 47"
+  ],
+  [
+   "T8 paper trades happen and charges are deducted",
+   true,
+   "{\"closed\":1,\"open\":0,\"eq\":100001,\"ch\":40} LOG: 12:18:10  blocked HDFCBANK long score 71: mood 0 does not allow longs\n12:08:16  blocked HDFCBANK long score 61: mood -1 does not allow longs\n12:08:16  blocked ICICIBANK long score 67: mood -1 does not allow longs\n11:58:22  blocked INFY long score 60: mood -1 does not allow longs\n11:38:34  PAPER EXIT SBIN LONG @ 2199.95 (trail) net ₹0.80 after charges ₹39.64\n11:23:43  PAPER ENTRY 360 SBIN LONG qty 17 @ 2197.57 stop 2155.42 score 62 mood 2\n11:23:43  blocked ICICIBANK short score -64: mood +2 does "
+  ],
+  [
+   "T9 Nifty mood computed",
+   true,
+   "{\"bias\":-1,\"tV\":-1,\"tR\":-1,\"tB\":1,\"br\":66.66666666666666,\"spike\":1.2279306426913006,\"pause\":false,\"c\":25440.25,\"vw\":26359.895677649452}"
+  ],
+  [
+   "T10 all positions squared off by 15:15 IST",
+   true,
+   "{\"open\":0,\"t\":\"2026-11-23T15:44:48.126Z\"}"
+  ],
+  [
+   "T11 intraday charges: STT 25, brokerage 40 on Rs1L each side",
+   true,
+   "{\"brok\":40,\"stt\":25,\"ex\":5.94,\"stamp\":3,\"sebi\":0.19999999999999998,\"gst\":8.3052,\"total\":82.4452}"
+  ],
+  [
+   "T12 no page errors during the run",
+   true,
+   ""
+  ]
+ ]
+}
